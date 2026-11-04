@@ -5,8 +5,13 @@
 #   .\scripts\install.ps1 -Target all -Skills tl-code-refactor,tl-seo-audit -DryRun
 #   .\scripts\install.ps1 -Target claude -Scope project -Project ..\my-app
 #
+# Without a clone (downloads the release archive to a temp dir, installs, deletes it):
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/tungle28/tl-skills/main/scripts/install.ps1))) -Target claude
+#   ... -Target cursor -Skills tl-goal-griller -Version v0.4.0
+#
 # It only finds a working Python and forwards the options to install.py (see that file for
-# what each one does). Unlike install.py, -Target defaults to claude.
+# what each one does). Unlike install.py, -Target defaults to claude. -Version picks the release
+# to download when the script runs outside a clone (default: the latest release, the main branch).
 #
 # If script execution is blocked:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Target claude
@@ -23,10 +28,19 @@ param(
   [switch]$Force,
   [switch]$DryRun,
   [ValidateSet('ask', 'check', 'skip')]
-  [string]$Deps
+  [string]$Deps,
+  [ValidatePattern('^v\d+\.\d+\.\d+$')]
+  [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Run from a downloaded string (irm | scriptblock) the script has no $PSScriptRoot, and `exit` there would
+# close the user's PowerShell window: set the exit code and return instead.
+function Exit-Install([int]$code) {
+  if ($PSScriptRoot) { exit $code }
+  $global:LASTEXITCODE = $code
+}
 
 # A name on PATH is not proof of an interpreter: Windows ships python/python3 shims in
 # WindowsApps that only print "Python was not found". Skip those and check the rest runs.
@@ -57,16 +71,16 @@ if (-not $python) {
     $answer = Read-Host 'Install Python now with `winget install --id Python.Python.3.12 -e`? [y/N]'
     if ($answer -notmatch '^(y|yes)$') {
       Write-Host 'Skipped. Install Python 3.9+ and re-run.'
-      exit 1
+      Exit-Install 1; return
     }
     & $winget.Source install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { Write-Host 'install.ps1: the Python install failed.' -ForegroundColor Red; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Write-Host 'install.ps1: the Python install failed.' -ForegroundColor Red; Exit-Install 1; return }
     # The installer updated PATH in the registry, not in this session: reload it.
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
     $python = @(Find-Python | Where-Object { $_ })
     if (-not $python) {
       Write-Host 'Python installed but not visible to this session; open a new terminal and re-run.' -ForegroundColor Yellow
-      exit 1
+      Exit-Install 1; return
     }
   }
   else {
@@ -74,11 +88,45 @@ if (-not $python) {
     Write-Host '    winget install --id Python.Python.3.12 -e'
     Write-Host '  or download it from https://www.python.org/downloads/'
     Write-Host '  (the "python" / "python3" entries in Settings > App execution aliases are only Store shortcuts)'
-    exit 1
+    Exit-Install 1; return
   }
 }
 
-$script = Join-Path $PSScriptRoot 'install.py'
+# Inside a clone, install from it. Run from a downloaded string (irm | scriptblock) there is no
+# $PSScriptRoot: download the release archive instead.
+$tmp = $null
+if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'install.py')) -and (Test-Path (Join-Path $PSScriptRoot '..\skills'))) {
+  if ($Version) { Write-Host "install.ps1: -Version ignored; installing from this checkout." -ForegroundColor Yellow }
+  $script = Join-Path $PSScriptRoot 'install.py'
+}
+else {
+  $repo = 'tungle28/tl-skills'
+  $url = if ($Version) { "https://github.com/$repo/archive/refs/tags/$Version.zip" } else { "https://github.com/$repo/archive/refs/heads/main.zip" }
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ('tl-skills-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $tmp | Out-Null
+  # Windows PowerShell 5.1 may default to TLS 1.0, which GitHub refuses; its progress bar also
+  # slows Invoke-WebRequest down a lot.
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $ProgressPreference = 'SilentlyContinue'
+  Write-Host "install.ps1: downloading $url"
+  try {
+    Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp 'src.zip') -UseBasicParsing
+    Expand-Archive -Path (Join-Path $tmp 'src.zip') -DestinationPath $tmp
+  }
+  catch {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host "install.ps1: download failed: $url ($($_.Exception.Message))" -ForegroundColor Red
+    Exit-Install 1; return
+  }
+  $script = Get-ChildItem -Path $tmp -Directory | ForEach-Object { Join-Path $_.FullName 'scripts\install.py' } |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $script) {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host 'install.ps1: the archive has no scripts\install.py.' -ForegroundColor Red
+    Exit-Install 1; return
+  }
+}
+
 $pyArgs = @($python | Select-Object -Skip 1) + @($script, '--target', $Target.ToLowerInvariant())
 if ($Scope) { $pyArgs += @('--scope', $Scope.ToLowerInvariant()) }
 if ($Project) {
@@ -97,5 +145,6 @@ if ($Force) { $pyArgs += '--force' }
 if ($DryRun) { $pyArgs += '--dry-run' }
 if ($Deps) { $pyArgs += @('--deps', $Deps.ToLowerInvariant()) }
 
-& $python[0] @pyArgs
-exit $LASTEXITCODE
+try { & $python[0] @pyArgs; $code = $LASTEXITCODE }
+finally { if ($tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue } }
+Exit-Install $code

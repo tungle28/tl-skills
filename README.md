@@ -24,6 +24,31 @@ Skills reply in the language you write in.
 Requires Python 3.9+ for the installer and the scripted skills. On Windows use `python` or `py -3`
 where this README says `python3`.
 
+### Without cloning
+
+One command downloads the release archive to a temp folder, runs the installer and deletes the
+folder. No git needed.
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/tungle28/tl-skills/main/scripts/install.sh | sh -s -- --target claude
+```
+```powershell
+# Windows PowerShell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/tungle28/tl-skills/main/scripts/install.ps1))) -Target claude
+```
+
+It takes the same options as `install.py` below (`--target cursor`, `--skills tl-goal-griller`,
+`--scope project --project ../my-app`, `--dry-run` …; in PowerShell `-Target`, `-Skills`, `-DryRun` …).
+It installs the latest release; add `--version v0.4.0` (PowerShell: `-Version v0.4.0`) to pin one.
+Read the script first if you prefer: open the same URL in a browser.
+
+`npx skills add tungle28/tl-skills --skill <name>` ([skills CLI](https://github.com/vercel-labs/skills))
+also works, but it copies only the skill folder. `tl-code-review`, `tl-security-audit` and
+`tl-skill-eval` ship sub-agents that it does not install, so use the command above for those.
+
+### From a clone
+
 ```bash
 git clone https://github.com/tungle28/tl-skills.git && cd tl-skills
 
@@ -40,12 +65,13 @@ python3 scripts/install.py --target claude --scope project --project ../my-app \
 Launchers that find a working Python for you: `./scripts/install.sh` (macOS/Linux) and
 `.\scripts\install.ps1` (Windows PowerShell), same flags as `install.py`.
 
-Existing files that differ are never overwritten without `--force`. To update, `git pull` and run the
-installer again with `--force`.
+Existing files that differ are never overwritten without `--force`. To update, run the no-clone
+command again with `--force` (`-Force`), or `git pull` and run the installer again with `--force`.
 
 ## Versions
 
-Each release is a tag (`v0.1.0`, …). To pin a version: `git checkout v0.1.0` before installing.
+Each release is a tag (`v0.1.0`, …). To pin a version: `--version v0.1.0` with the no-clone command,
+or `git checkout v0.1.0` before installing from a clone.
 
 This repository is published from a separate development repository, one snapshot per release, so
 pull requests here are not merged directly — open an issue instead.

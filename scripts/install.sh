@@ -6,15 +6,22 @@
 #   sh scripts/install.sh --target all --skills tl-code-refactor,tl-seo-audit --dry-run
 #   sh scripts/install.sh --target claude --scope project --project ../my-app
 #
+# Without a clone (downloads the release archive to a temp dir, installs, deletes it):
+#   curl -fsSL https://raw.githubusercontent.com/tungle28/tl-skills/main/scripts/install.sh | sh -s -- --target claude
+#   ... | sh -s -- --target cursor --skills tl-goal-griller --version v0.4.0
+#
 # It only finds a working Python 3.9+ and forwards every option to install.py unchanged (see that
 # file for what they do). Unlike install.py, --target defaults to claude. If Python is missing it
 # offers to install it (asks first; without a terminal it only prints what to run).
+# --version vX.Y.Z is read here, not by install.py: it picks the release to download when the
+# script runs outside a clone (default: the latest release, i.e. the main branch).
 # Windows: use scripts\install.ps1.
 
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=tungle28/tl-skills
 py=""
+tmp=""
 
 # A name on PATH is not proof of an interpreter (the Windows Store shim, an old 2.x python), so
 # run each candidate and check the version. WindowsApps matters when this runs under Git Bash.
@@ -62,7 +69,8 @@ pick_installer() {
   esac
 }
 
-if ! find_python; then
+ensure_python() {
+  find_python && return 0
   echo "install.sh: no working Python 3.9+ found (install.py needs it)." >&2
   pick_installer
   if [ -n "$how" ] && [ -t 0 ]; then
@@ -104,13 +112,73 @@ if ! find_python; then
     echo "  Other:   https://www.python.org/downloads/" >&2
     exit 1
   fi
-fi
+}
 
-# Default the target, but leave --help and an explicit --target/--target=X alone.
-has_target=0
-for arg in "$@"; do
-  case $arg in --target | --target=* | -h | --help) has_target=1 ;; esac
-done
-[ "$has_target" = 1 ] || set -- --target claude "$@"
+# Downloads the release archive for $1 ("" = latest) into a temp dir and sets `src` to the
+# extracted checkout. Plain HTTPS + tar: no git needed.
+fetch_release() {
+  if [ -n "$1" ]; then url="https://github.com/$REPO/archive/refs/tags/$1.tar.gz"
+  else url="https://github.com/$REPO/archive/refs/heads/main.tar.gz"; fi
+  tmp=$(mktemp -d 2>/dev/null || mktemp -d -t tl-skills)
+  trap 'rm -rf "$tmp"' EXIT INT TERM
+  echo "install.sh: downloading $url" >&2
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$tmp/src.tar.gz" || { echo "install.sh: download failed: $url" >&2; exit 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$tmp/src.tar.gz" "$url" || { echo "install.sh: download failed: $url" >&2; exit 1; }
+  else
+    echo "install.sh: need curl or wget to download $url" >&2; exit 1
+  fi
+  tar -xzf "$tmp/src.tar.gz" -C "$tmp" || { echo "install.sh: could not extract the archive." >&2; exit 1; }
+  for d in "$tmp"/*/; do
+    if [ -f "$d/scripts/install.py" ]; then src=${d%/}; return 0; fi
+  done
+  echo "install.sh: the archive has no scripts/install.py." >&2; exit 1
+}
 
-exec "$py" "$here/install.py" "$@"
+main() {
+  # --version is ours, not install.py's: take it out of the arguments.
+  version="" n=$#
+  while [ "$n" -gt 0 ]; do
+    arg=$1; shift; n=$((n - 1))
+    case $arg in
+      --version) [ "$n" -gt 0 ] || { echo "install.sh: --version needs a value (e.g. v0.4.0)" >&2; exit 2; }
+                 version=$1; shift; n=$((n - 1)) ;;
+      --version=*) version=${arg#--version=} ;;
+      *) set -- "$@" "$arg" ;;
+    esac
+  done
+  case $version in
+    "" | v[0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "install.sh: --version must look like v0.4.0, got '$version'" >&2; exit 2 ;;
+  esac
+  case $version in *[!v0-9.]*) echo "install.sh: --version must look like v0.4.0, got '$version'" >&2; exit 2 ;; esac
+
+  # Default the target, but leave --help and an explicit --target/--target=X alone.
+  has_target=0
+  for arg in "$@"; do
+    case $arg in --target | --target=* | -h | --help) has_target=1 ;; esac
+  done
+  [ "$has_target" = 1 ] || set -- --target claude "$@"
+
+  ensure_python
+
+  # Inside a clone, install from it. Piped (curl ... | sh) $0 is the shell, so there is no
+  # install.py next to it: download the release instead.
+  here=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || here=""
+  if [ -n "$here" ] && [ -f "$here/install.py" ] && [ -d "$here/../skills" ]; then
+    [ -z "$version" ] || echo "install.sh: --version ignored; installing from this checkout ($here/..)" >&2
+    exec "$py" "$here/install.py" "$@"
+  fi
+
+  fetch_release "$version"
+  # A piped script's stdin is the pipe: give install.py the terminal so it can still ask.
+  if (: </dev/tty) 2>/dev/null; then
+    "$py" "$src/scripts/install.py" "$@" </dev/tty
+  else
+    "$py" "$src/scripts/install.py" "$@"
+  fi
+}
+
+# Everything above only defines functions, so a piped script is fully read before any of it runs.
+main "$@"
