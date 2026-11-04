@@ -22,6 +22,7 @@ from pathlib import Path
 
 from common import SEV_WEIGHT, load_state, now_iso, read_json, redact, secret_digest, write_json
 from engine import find_engine
+from memory import Sources, load_triage, triage_hit
 from ruleset import applies_to, check_applies, load_checks, load_rules, match_rule
 
 try:
@@ -155,6 +156,8 @@ def main():
     rules, rule_errors = load_rules(root, extra)
     checks, check_errors = load_checks(root)
     sups = load_suppressions(root)
+    known_fp = [e for e in load_triage(root) if e["verdict"] == "false-positive"]
+    src = Sources(root)
     tools = [{"tool": "pattern-rules", "status": "ran", "rules": len(rules),
               "rule_errors": rule_errors, "check_errors": check_errors}]
 
@@ -179,7 +182,7 @@ def main():
                 if secret:
                     secret_digests.add((secret_digest(secret), len(secret),
                                         any(c.isspace() for c in secret)))
-                why = suppressed_by(h, sups, lines)
+                why = suppressed_by(h, sups, lines) or triage_hit(h, known_fp, src)
                 if why:
                     suppressed.append({**h, "suppressed": why})
                 else:
@@ -197,13 +200,13 @@ def main():
                 "errors": len(taint.get("errors", [])) + len(taint.get("spec_errors", []))}
         tools.append(st_t)
         for h in taint.get("hits", []):
-            why = suppressed_by(h, sups, texts.get(h["file"], "").splitlines())
+            why = suppressed_by(h, sups, texts.get(h["file"], "").splitlines()) or triage_hit(h, known_fp, src)
             (suppressed if why else hits).append({**h, **({"suppressed": why} if why else {})})
 
     sg_status, sg_hits = run_semgrep(root, st.get("semgrep_dirs", []))
     tools.append(sg_status)
     for h in sg_hits:
-        why = suppressed_by(h, sups, texts.get(h["file"], "").splitlines())
+        why = suppressed_by(h, sups, texts.get(h["file"], "").splitlines()) or triage_hit(h, known_fp, src)
         (suppressed if why else hits).append({**h, **({"suppressed": why} if why else {})})
 
     # Stable ids so reviewers and the merge step can refer to hits.

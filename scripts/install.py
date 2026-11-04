@@ -55,8 +55,8 @@ PLATFORM_ONLY = {
                                    "third-party skill by Anthropic"),
 }
 # Repository-only files at a skill's root: the user guide (same name as USER_GUIDE in
-# tl-skill-eval/scripts/lint_skill.py). Agents never read it.
-REPO_ONLY = {"WORKFLOW.md"}
+# tl-skill-eval/scripts/lint_skill.py) and its rendered HTML copy. Agents never read them.
+REPO_ONLY = {"WORKFLOW.md", "WORKFLOW.html"}
 # Claude Code-only frontmatter keys that Cursor does not understand
 CURSOR_DROP_KEYS = {"tools", "skills"}
 

@@ -321,6 +321,7 @@ def write_page(out, report_md, rows, severities, facets, lang):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import OWASP_2025, SEVERITIES, load_state, read_json  # noqa: E402
 from findings import redact_obj, secret_rules  # noqa: E402
+from memory import NOT_LIVE  # noqa: E402
 
 
 def location(f):
@@ -330,7 +331,7 @@ def location(f):
 
 def rows_from(run):
     doc = read_json(run / "merged.json") or {}
-    live = [f for f in doc.get("findings", []) if f.get("status") not in ("rejected", "out-of-scope")]
+    live = [f for f in doc.get("findings", []) if f.get("status") not in NOT_LIVE]
     live.sort(key=lambda f: (SEVERITIES.index(f["severity"]) if f.get("severity") in SEVERITIES else 9, f["id"]))
     rows = []
     for f in live:
@@ -342,7 +343,8 @@ def rows_from(run):
                                       f"requires {f.get('requires')}", f.get("kind")) if x)
         details.insert(0, ["Details", meta, False])
         rows.append({"id": f["id"], "sev": f["severity"], "title": f.get("title", ""), "loc": location(f),
-                     "facets": {"OWASP": f"{ow} {OWASP_2025.get(ow, '')}".strip(), "Status": f.get("status", "")},
+                     "facets": {"OWASP": f"{ow} {OWASP_2025.get(ow, '')}".strip(), "Status": f.get("status", ""),
+                                **({"Change": f["delta"]} if f.get("delta") else {})},
                      "details": details})
     # Reviewers and the narrative can quote a secret; report.md masks them, so the page must too.
     return redact_obj(rows, secret_rules(run))

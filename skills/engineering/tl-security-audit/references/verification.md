@@ -30,5 +30,7 @@ exploit code.
 
 ## Outcomes
 - `confirmed` — list the places you checked in the note.
-- `rejected` — cite where the control is (`file:line`).
+- `rejected` — cite where the control is (`file:line`). If the finding is real but another finding
+  in the batch already states it, start the note with `duplicate of <id>`. Such a rejection is
+  not a false positive, and later runs must not learn it as one.
 - `adjusted` — real, but severity/requires/kind wrong (e.g. admin-only, internal network, test code).

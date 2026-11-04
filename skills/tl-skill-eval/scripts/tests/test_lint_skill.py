@@ -47,3 +47,26 @@ class WindowsPathCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuideHtmlCheck(unittest.TestCase):
+    """WORKFLOW.html must be built from the current WORKFLOW.md (source-sha256 stamp)."""
+
+    def state(self, guide, html):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = Path(tmp)
+            if guide is not None:
+                (skill / "WORKFLOW.md").write_bytes(guide)
+            if html is not None:
+                stamp = hashlib.sha256(html.replace(b"\r\n", b"\n")).hexdigest()
+                (skill / "WORKFLOW.html").write_text(f'<head>\n<meta name="source-sha256" content="{stamp}">',
+                                                     encoding="utf-8")
+            return lint_skill.guide_html_state(skill)
+
+    def test_states(self):
+        self.assertIsNone(self.state(None, None))
+        self.assertEqual(self.state(b"# Guide\n", None), "missing")
+        self.assertEqual(self.state(b"# Guide\n", b"# Guide\n"), "ok")
+        self.assertEqual(self.state(b"# Guide\r\n", b"# Guide\n"), "ok")  # CRLF checkout is not stale
+        self.assertEqual(self.state(b"# Guide v2\n", b"# Guide\n"), "stale")

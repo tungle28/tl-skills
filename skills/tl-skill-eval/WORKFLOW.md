@@ -93,7 +93,7 @@ python scripts/lint_skill.py <skill> [<module> …] --siblings <skills-root> [--
 
 - **Errors** (chặn verdict PASS): tên sai định dạng, description > 1024 ký tự, nhiều hơn một tệp SKILL, frontmatter sub-agent lỗi.
 - **Warnings** (đưa vào khuyến nghị): body > 500 dòng, reference lồng quá 1 cấp, file > 100 dòng không có mục lục, đường dẫn Windows, thiếu tín hiệu "khi nào dùng"…
-- **Stale user guide**: nếu skill có `WORKFLOW.md`, lint dùng git để cảnh báo khi SKILL.md có commit mới hơn guide, hoặc SKILL.md đang sửa dở mà guide thì không.
+- **Stale user guide**: nếu skill có `WORKFLOW.md`, lint dùng git để cảnh báo khi SKILL.md có commit mới hơn guide, hoặc SKILL.md đang sửa dở mà guide thì không. Lint cũng cảnh báo khi `WORKFLOW.html` (bản render của guide bằng tl-md-to-html) bị thiếu hoặc được build từ một `WORKFLOW.md` cũ hơn. Lint so mã hash `source-sha256` ghi trong trang với nội dung guide hiện tại.
 - **Info**: ước lượng token theo 3 tầng (description luôn nằm trong context, body khi trigger, references khi cần; `WORKFLOW.md` không được tính vì agent không đọc nó), trùng lặp câu giữa các skill trong cùng family, danh sách **siblings** có description gần giống — nguồn cho câu hỏi near-miss ở Phase 2.
 - **Reviewer notes**: agent tự đọc skill để ghi nhận xét, ghi rõ đây là nhận định, không phải số đo.
 

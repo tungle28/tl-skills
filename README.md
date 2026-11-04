@@ -9,11 +9,12 @@ YAML frontmatter `name` + `description`, then Markdown instructions — plus opt
 | Skill | What it does | Claude Code | Cursor | Codex |
 |---|---|:-:|:-:|:-:|
 | [`tl-code-review`](skills/engineering/tl-code-review/) | Code review of a snippet, diff, PR, feature, layer or whole repo: fast single pass for small diffs, otherwise scripted scope and blast radius → parallel reviewers → verifier → verdict; optional CI/ticket context and confirmed posting to the PR. [How it works →](skills/engineering/tl-code-review/WORKFLOW.md) | ✅ | ✅ | ✅ |
-| [`tl-security-audit`](skills/engineering/tl-security-audit/) | Security audit of a repo, module or PR — from secrets and injection to access control and business logic. [How it works →](skills/engineering/tl-security-audit/WORKFLOW.md) | ✅ | ✅ | ✅ |
+| [`tl-security-audit`](skills/engineering/tl-security-audit/) | Security audit of a repo, module or PR — from secrets and injection to access control and business logic. Remembers false positives and accepted risks you approve, and compares each report with the previous run. [How it works →](skills/engineering/tl-security-audit/WORKFLOW.md) | ✅ | ✅ | ✅ |
 | [`tl-skill-eval`](skills/tl-skill-eval/) | Evidence-backed scorecard for a skill: lint (limits, load cost, duplication across a skill family), trigger precision/recall with near misses, quality vs baseline, and seeded-defect metrics for audit skills. Uses `skill-creator` to run evals; trigger and baseline runs need Claude Code, the lint and metrics scripts run anywhere. [How it works →](skills/tl-skill-eval/WORKFLOW.md) | ✅ | ✅ | ✅ |
 
 Skills with a **How it works** link ship a `WORKFLOW.md`: a user guide with the phases, agents, gates
-and outputs. Agents don't load it, and the installer doesn't copy it.
+and outputs. Next to it, `WORKFLOW.html` is the same guide rendered with its diagrams, for reading in a
+browser. Agents don't load either file, and the installer doesn't copy them.
 
 Skills reply in the language you write in.
 

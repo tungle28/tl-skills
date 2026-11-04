@@ -68,7 +68,8 @@ never with absolute claims.
 Checks hard limits (name format/length, description ≤1024 chars, single SKILL.md) and
 authoring heuristics (body ≤500 lines, reference depth = 1, TOC on files >100 lines,
 first/second-person descriptions, time-sensitive wording, Windows paths, missing
-"when to use" signal, a `WORKFLOW.md` user guide that git shows is older than SKILL.md). The guide is
+"when to use" signal, a `WORKFLOW.md` user guide that git shows is older than SKILL.md, and a `WORKFLOW.html` that is missing
+or was built from an older guide). The guide is
 for people, so it is left out of the load cost. Errors block a PASS verdict; warnings go into recommendations.
 Also read the SKILL.md yourself for things a script can't judge: code or markup the agent must
 re-derive every run from prose (a candidate for `scripts/` or `assets/`), contradictions between a

@@ -1,3 +1,6 @@
 # Shell scripts must keep LF on every platform: a CRLF checkout makes `sh` fail on the stray
 # carriage returns.
 *.sh text eol=lf
+
+# Git hooks run under sh: keep them LF too.
+.githooks/* text eol=lf

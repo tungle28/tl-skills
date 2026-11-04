@@ -38,6 +38,8 @@ table in the report (from `surface.md` or `narrative.json`) under the same rules
 | Dashboard — by OWASP | OWASP 2025 \| Category \| critical \| high \| medium \| low \| info \| Total | script |
 | Dashboard — by area | Area \| Findings \| Share | script |
 | Other Findings by OWASP Category (one per category) | ID \| Title \| Location \| Severity \| Confidence \| Status | script |
+| Changes Since Previous Run | Previous ID \| Title \| Location \| Severity \| Why gone | script |
+| Known from Earlier Runs | ID \| Title \| Location \| Severity \| Verdict \| Entry \| Reason \| Until | script |
 | Dependencies | ID \| Package \| Severity \| Ecosystem \| Transitive \| Advisories | script |
 | Outside Review Scope | ID \| Title \| Location \| Severity | script |
 | Dismissed and Suppressed | Rule \| Dismissed by reviewer \| Suppressed | script |

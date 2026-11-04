@@ -13,6 +13,7 @@ from pathlib import Path
 
 from common import (CONFIDENCES, OWASP_2025, SEV_WEIGHT, SEVERITIES, load_state, now_iso, read_json,
                     redact, secret_digest, write_json)
+from memory import NOT_LIVE, apply_triage, diff_runs
 from ruleset import entropy, load_rules
 
 KINDS = ("vulnerability", "weakness", "hardening", "cost-risk")
@@ -523,6 +524,8 @@ def cmd_merge(run):
         dup.setdefault("merged_ids", []).append(f["id"])
         if len({s.split(":")[0] for s in dup["sources"]}) > 1 and dup["confidence"] != "high":
             dup["confidence"] = CONFIDENCES[max(0, CONFIDENCES.index(dup["confidence"]) - 1)]
+    # Decisions from earlier runs (.security-audit/triage.yml) on code that has not changed since.
+    n_triaged = apply_triage(merged, load_state(run).get("root") or inv.get("root", "."))
     for f in merged:
         f["priority"] = score(f)
     merged.sort(key=lambda f: -f["priority"])
@@ -543,7 +546,8 @@ def cmd_merge(run):
                                      "coverage": coverage, "merge_errors": errors, "gates": gate_summary})
     st = Counter(f["status"] for f in merged)
     print(f"merged={len(merged)} ({dict(st)}) dismissed={len(dismissed)} schema_errors={len(errors)} "
-          f"gates answered {gate_summary['answered']}/{gate_summary['in_scope']} in scope")
+          f"gates answered {gate_summary['answered']}/{gate_summary['in_scope']} in scope"
+          + (f" known-from-triage.yml={n_triaged}" if n_triaged else ""))
     dropped = sum(1 for e in errors if e.get("missing") or e.get("unreadable"))
     if errors:
         print(f"schema problems: {dropped} dropped/unreadable, {len(errors) - dropped} coerced "
@@ -551,7 +555,7 @@ def cmd_merge(run):
     for e in errors[:10]:
         print("  schema:", e)
     # A compact list, so the orchestrator can challenge findings without writing its own script.
-    live = [f for f in merged if f["status"] != "out-of-scope"]
+    live = [f for f in merged if f["status"] not in NOT_LIVE]
     print(f"\n{'id':<10} {'sev':<8} {'conf':<6} {'status':<10} location  title")
     for f in live[:60]:
         also = f" (+{','.join(f['merged_ids'])})" if f.get("merged_ids") else ""
@@ -571,7 +575,7 @@ def cmd_verify_queue(run, top_k, batch_size, scope="default", append=False):
     # them covers — by id or by an id this finding absorbed when the new reviewer output was merged
     old = read_json(run / "verify_queue.json", {}).get("batches", []) if append else []
     queued = {i for b in old for i in b["ids"]}
-    live = [f for f in doc["findings"] if f["status"] not in ("rejected", "out-of-scope")
+    live = [f for f in doc["findings"] if f["status"] not in NOT_LIVE
             and not f["id"].startswith("DEP-")  # dependency advisories are verified by the tool, not by reading
             and f["id"] not in queued and not queued & set(f.get("merged_ids", []))]
     if scope == "strict":
@@ -640,7 +644,9 @@ def detail(f):
         extra.append(f["cwe"])
     head = (f"#### {f['id']} · {f['title']}\n"
             f"{loc(f)} · {f['owasp']} {OWASP_2025.get(f['owasp'], '')} · {' · '.join(extra) + ' · ' if extra else ''}"
-            f"**{f['severity']}** · confidence {f['confidence']} · requires {f['requires']} · {f['kind']} · {f['status']}\n")
+            f"**{f['severity']}** · confidence {f['confidence']} · requires {f['requires']} · {f['kind']} · {f['status']}"
+            + (f" · {f['delta']}" + (f" (was {f['baseline_id']})" if f.get("baseline_id") else "") if f.get("delta") else "")
+            + "\n")
     body = [f"- **Evidence:** {f['evidence']}", f"- **Attack scenario:** {f['attack_scenario']}",
             f"- **Impact:** {f['impact']}", f"- **Fix:** {f['fix']}",
             f"- **Sources:** {', '.join(f['sources'])}" + (f" (hits {', '.join(f['from_hits'][:6])})" if f["from_hits"] else "")]
@@ -659,15 +665,18 @@ def cmd_report(run):
     # Verifier notes arrive after merge redacted the reviewers' text; mask them before persisting.
     red = secret_rules(run)
     doc = redact_obj(doc, red)
-    write_json(run / "merged.json", doc)
     inv = read_json(run / "inventory.json", {})
     st = read_json(run / "state.json", {})
+    delta = diff_runs(run, doc, st, inv) if st.get("root") else None
+    doc["delta"] = delta
+    write_json(run / "merged.json", doc)
     tools = read_json(run / "scan" / "tools.json", []) + read_json(run / "deps.json", {}).get("tools", [])
     narr = read_json(run / "narrative.json", {})
     shards = read_json(run / "shards.json", [])
     suppressed = read_json(run / "scan" / "suppressed.json", []) + read_json(run / "deps.json", {}).get("suppressed", [])
     surface_md = (run / "surface.md").read_text(encoding="utf-8") if (run / "surface.md").exists() else ""
-    live = [f for f in doc["findings"] if f["status"] not in ("rejected", "out-of-scope")]
+    live = [f for f in doc["findings"] if f["status"] not in NOT_LIVE]
+    known = [f for f in doc["findings"] if f["status"] in ("known-fp", "accepted-risk")]
     oos = [f for f in doc["findings"] if f["status"] == "out-of-scope"]
     rejected = [f for f in doc["findings"] if f["status"] == "rejected"]
     scope = inv.get("scope", {})
@@ -739,6 +748,11 @@ def cmd_report(run):
     if scope.get("kind") == "changeset":
         gaps.append("- Changeset scope: only changed files (+ one hop of callers/callees) were reviewed; "
                     "no whole-system claims (OWASP checklist, data classification, compliance) are made.")
+    missed = [x for x in (delta or {}).get("gone", []) if x["reason"] == "code unchanged, not reported"]
+    if missed:
+        gaps.append(f"- {len(missed)} findings of the previous run sit on unchanged code but were not reported "
+                    "this run (possible misses — see Changes Since Previous Run): "
+                    + ", ".join(f"{x['id']} `{x['file']}:{x['line_start']}`" for x in missed[:6]))
     drop = [e for e in doc.get("merge_errors", []) if e.get("missing") or e.get("unreadable")]
     if drop:
         gaps.append(f"- Reviewer output schema problems: {len(drop)} findings/files dropped (see merged.json)")
@@ -759,6 +773,21 @@ def cmd_report(run):
     L += ["", table([[a, n, bar(n, max(area.values()))] for a, n in area.most_common(10)], ["Area", "Findings", "Share"])]
     L += ["", f"Gate sites: {g.get('total', 0)} tagged, {g.get('in_scope', 0)} in scope, {g.get('answered', 0)} answered "
               f"({g.get('clear', 0)} clear, {g.get('candidate', 0)} candidate, {g.get('unknown', 0)} unknown)."]
+
+    L += ["", "## Changes Since Previous Run", ""]
+    if delta:
+        gone = delta["gone"]
+        L.append(f"Baseline: `{Path(delta['baseline']).name}` ({delta.get('baseline_created') or '?'}). "
+                 f"{delta['new']} new, {delta['persisting']} persisting, {len(gone)} no longer reported.")
+        if gone:
+            L += ["", table([[x["id"], x["title"], f"`{x['file']}:{x['line_start']}`", x["severity"], x["reason"]]
+                             for x in gone[:40]], ["Previous ID", "Title", "Location", "Severity", "Why gone"])]
+            if len(gone) > 40:
+                L.append(f"… and {len(gone) - 40} more (merged.json → delta)")
+            L += ["", "_code changed_ = likely fixed, confirm; _code unchanged, not reported_ = possibly missed "
+                      "this run, re-check before treating it as fixed."]
+    else:
+        L.append("_No previous finished run of this repository found — every finding is new._")
 
     top = [f for f in live if f["severity"] in ("critical", "high")]
     L += ["", "## Critical and High Findings", ""]
@@ -793,10 +822,17 @@ def cmd_report(run):
     else:
         L.append(surface_md or "_(orchestrator/surface reviewer: write surface.md)_")
 
+    if known:
+        L += ["", "## Known from Earlier Runs", "",
+              f"{len(known)} findings match a decision in `.security-audit/triage.yml` on unchanged code "
+              "(not counted above; review the list when the threat model changes):", "",
+              table([[f["id"], f["title"], loc(f), f["severity"], f["triage"]["verdict"], f["triage"].get("id"),
+                      f["triage"]["reason"], f["triage"].get("until") or "-"] for f in known[:60]],
+                    ["ID", "Title", "Location", "Severity", "Verdict", "Entry", "Reason", "Until"])]
     L += ["", "## Dismissed and Suppressed", ""]
     dis = Counter(d["rule_id"] for d in doc.get("dismissed", []))
     sup = Counter(s["rule_id"] for s in suppressed)
-    rows = [[r, dis.get(r, 0), sup.get(r, 0)] for r in sorted(set(dis) | set(sup), key=lambda r: -(dis[r] + sup[r]))]
+    rows = [[r, dis.get(r, 0), sup.get(r, 0)] for r in sorted(set(dis) | set(sup), key=lambda r: (-(dis[r] + sup[r]), r))]
     L.append(table(rows[:15], ["Rule", "Dismissed by reviewer", "Suppressed"]) if rows else "_None._")
     if rejected:
         L += ["", "Rejected by verifier: " + ", ".join(f"{f['id']}" for f in rejected[:20])]
@@ -807,7 +843,12 @@ def cmd_report(run):
     for pr in problems[:10]:
         print(f"WARNING: table repaired — {pr} (follow references/report-tables.md)")
     print(f"report.md written: {len(live)} findings ({dict(sev)}), {len(rejected)} rejected, "
-          f"{len(gaps)} coverage gaps")
+          f"{len(known)} known from triage.yml, {len(gaps)} coverage gaps"
+          + (f"; vs previous run: {delta['new']} new, {delta['persisting']} persisting, {len(delta['gone'])} gone"
+             if delta else ""))
+    if rejected or doc.get("dismissed"):
+        print("learn: `scripts/memory.py learn --run-dir <RUN_DIR>` proposes triage.yml entries from the "
+              "rejected/dismissed items — show them to the user and apply only approved ones")
 
 
 def main():

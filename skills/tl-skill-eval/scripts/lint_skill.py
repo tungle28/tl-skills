@@ -12,7 +12,8 @@ Usage:
 Errors = hard-limit violations. Warnings = heuristics worth a human look. Info includes a load-cost
 estimate: description (always in context), SKILL.md body (on trigger), references/agents (on demand).
 A WORKFLOW.md user guide at the skill root is not agent context: it is left out of the load cost and
-the duplication checks, and flagged when git shows SKILL.md changed after it.
+the duplication checks, and flagged when git shows SKILL.md changed after it. Its rendered
+WORKFLOW.html is flagged when missing or built from a different WORKFLOW.md (source-sha256 stamp).
 """
 import argparse
 import re
@@ -36,6 +37,7 @@ STOP = set("the a an and or of to in for on with by is are be it this that as at
 
 
 USER_GUIDE = "WORKFLOW.md"  # human-facing guide; agents never load it
+GUIDE_HTML = "WORKFLOW.html"  # the guide rendered by tl-md-to-html; stamped with the guide's sha256
 
 
 def md_files(skill_path, guide=False):
@@ -64,6 +66,20 @@ def guide_staleness(skill_path):
     changed = {line[3:].rsplit("/", 1)[-1] for line in dirty.splitlines()}
     return {"skill_commits_since_guide": int(since or 0),
             "skill_uncommitted": "SKILL.md" in changed and USER_GUIDE not in changed}
+
+
+def guide_html_state(skill_path):
+    """'missing', 'stale' or 'ok' for WORKFLOW.html against WORKFLOW.md; None when there is no guide.
+    The page carries <meta name="source-sha256"> of the guide it was built from (LF line endings)."""
+    import hashlib
+    guide, html = skill_path / USER_GUIDE, skill_path / GUIDE_HTML
+    if not guide.exists():
+        return None
+    if not html.exists():
+        return "missing"
+    want = hashlib.sha256(guide.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    m = re.search(r'<meta name="source-sha256" content="([0-9a-f]{64})"', read_text(html))
+    return "ok" if m and m.group(1) == want else "stale"
 
 
 def lint_agents(skill_path, prefix, errors, warnings):
@@ -204,6 +220,13 @@ def lint(skill_path, prefix=None):
                             f"check the user guide still matches")
         if stale["skill_uncommitted"]:
             warnings.append(f"SKILL.md has uncommitted changes but {USER_GUIDE} doesn't; update the guide if the workflow changed")
+    page = guide_html_state(skill_path)
+    if page is not None:
+        info.setdefault("user_guide", {"file": USER_GUIDE})["html"] = page
+        if page != "ok":
+            what = "is missing" if page == "missing" else f"was built from an older {USER_GUIDE}"
+            warnings.append(f"{GUIDE_HTML} {what}: render {USER_GUIDE} with tl-md-to-html "
+                            f"(in the skills repo: python scripts/build_workflow_html.py)")
 
     info["agents"] = lint_agents(skill_path, prefix, errors, warnings)
     if TIME_WORDS.search(body):

@@ -39,7 +39,8 @@ def cmd_init(a, extra):
     save_state(run, {"root": str(root), "mode": a.mode, "lang": a.lang, "created_at": now_iso(),
                      "authorization": a.authorization, "rules_dirs": [str(Path(d).resolve()) for d in a.rules_dir],
                      "semgrep_dirs": [str(Path(d).resolve()) for d in a.semgrep_dir],
-                     "inventory_args": extra, "phases": {p: {"status": "pending"} for p in PHASES}})
+                     "inventory_args": extra,
+                     **({"baseline": str(Path(a.baseline).resolve())} if a.baseline else {}), "phases": {p: {"status": "pending"} for p in PHASES}})
     print(f"RUN_DIR={run}")
     print(f"LANG={a.lang}")
     exclude_run_dir(root, run)
@@ -263,6 +264,7 @@ def main():
     i.add_argument("--rules-dir", action="append", default=[], help="extra pattern-rule directory")
     i.add_argument("--semgrep-dir", action="append", default=[], help="extra semgrep rule directory")
     i.add_argument("--run-dir")
+    i.add_argument("--baseline", help="earlier run dir to diff against (default: newest finished run of this repo)")
     r = sub.add_parser("run")
     r.add_argument("phase")
     r.add_argument("--run-dir", required=True)

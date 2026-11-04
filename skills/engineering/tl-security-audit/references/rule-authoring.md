@@ -94,3 +94,5 @@ The scan phase computes which checks apply to each shard; reviewers read only th
 ```
 A suppression without `reason` is ignored. Inline: `// security-audit: ignore <rule-id>` on the line
 or the line above. Suppressed hits are counted in the report, never hidden completely.
+
+For one specific site, prefer a triage entry, pinned to its code lines (`cross-run-memory.md`).

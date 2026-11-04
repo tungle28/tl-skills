@@ -28,6 +28,9 @@ Design choices (adapt sensibly when the situation differs):
   before findings — a partial review must never read like a clean one.
 - **Extensible without editing the skill.** Project rules/checks/suppressions live in
   `<repo>/.security-audit/` (see `references/rule-authoring.md`).
+- **Runs learn from earlier runs.** Triage decisions the user approved live in
+  `<repo>/.security-audit/triage.yml`. Each applies only while the flagged code is unchanged.
+  Every report is diffed against the previous run (`references/cross-run-memory.md`).
 
 Paths: `$S` = this skill's directory.
 
@@ -52,7 +55,8 @@ Paths: `$S` = this skill's directory.
   shows the fix works instead, built on inert input (e.g. a search term containing a quote that
   must match literally), never a known attack string such as a tautology or UNION clause.
 - **Secrets are never repeated.** Scanner output is redacted; keep it that way in chat and reports.
-- **No source changes outside `fix` mode.** Run artifacts go to `<repo>/.security-run/` (they map
+- **No source changes outside `fix` mode** (the one exception: `triage.yml` entries the user approved
+  in Phase 7 step 4). Run artifacts go to `<repo>/.security-run/` (they map
   where the weaknesses are). `init` adds that folder to `.git/info/exclude` — local-only, no tracked
   file changes — so it never shows up in `git status` or gets committed by accident. Never copy
   run artifacts into the repository or a PR.
@@ -84,8 +88,10 @@ only a full scope can populate the Security Architecture section.
 ```bash
 python3 $S/scripts/pipeline.py init --root <repo> --lang <code> [--mode audit|fix] \
   [--authorization "own repo" ] [--path src/Payments] [--diff main] [--max-shards N] \
-  [--include-tests] [--include-vendor] [--exclude '<glob>'] [--rules-dir <dir>] [--semgrep-dir <dir>]
-# prints RUN_DIR=<repo>/.security-run/<timestamp>
+  [--include-tests] [--include-vendor] [--exclude '<glob>'] [--rules-dir <dir>] [--semgrep-dir <dir>] \
+  [--baseline <earlier RUN_DIR>]
+# prints RUN_DIR=<repo>/.security-run/<timestamp>; the baseline defaults to the newest finished run
+# of the same repo in .security-run/
 ```
 Keep `--root` at the repository root and narrow with `--path`/`--only`/`--diff`: rules and secrets
 always scan the whole repo (cheap, and a leaked key outside scope is still a leak); only the
@@ -179,7 +185,8 @@ python3 $S/scripts/pipeline.py run collect --run-dir $RUN_DIR   # marks review d
 ```
 `merge` validates reviewer JSON, folds triaged scanner hits into findings, keeps untriaged hits
 visible, adds dependency findings, dedupes (only findings from different reviewers about the same
-CWE; one reviewer's separate findings stay separate) and scores by severity × confidence × attacker
+CWE; one reviewer's separate findings stay separate), sets `triage.yml` matches to
+`known-fp`/`accepted-risk` (uncounted) and scores by severity × confidence × attacker
 position, then prints a compact finding table — challenge findings from it, not from a script of
 your own. If one reviewer's output has many schema errors, fix the file or re-dispatch and re-run
 `run collect`. `verify-queue` selects what to re-check (in `solo` mode only critical, cost-risk and
@@ -195,7 +202,8 @@ the rest. Don't wait for it: when all reviewers but the last one or two are done
 ids) — and dispatch those. Verdicts on findings that the second merge folded into another finding
 still apply.
 To overrule a verdict, edit that verdict in `verification/<batch>.json` with your reason; do not
-hand-edit `merged.json` — the next merge would overwrite it.
+hand-edit `merged.json` — the next merge would overwrite it. Reject a mere duplicate with a note
+starting `duplicate of <id>`, so it is never learned as a false positive.
 
 ## Phase 7 — Report
 1. Write `$RUN_DIR/narrative.json` from the collect table and the verdicts, then render once:
@@ -224,6 +232,12 @@ hand-edit `merged.json` — the next merge would overwrite it.
    that is easier to review, before or after the run. Otherwise end the chat summary with a
    one-line offer. Re-render it after any `run finish`. Handle it like `report.md`: give its path,
    and keep it out of the repository.
+
+4. **Learn (ask the user).** When `run finish` prints a `learn:` hint, follow the learning step in
+   `references/cross-run-memory.md`. Write to `triage.yml` only the proposals the user approves.
+   Do the same for a risk the user accepts. In the chat summary, report both kinds of finding
+   that disappeared since the previous run: the ones whose code changed and the ones whose code
+   is unchanged but were not reported this time.
 
 ## Phase 8 — Fix (mode `fix`, user-selected findings only)
 Follow `references/fix-playbook.md`: branch, green baseline, one finding per commit with a
