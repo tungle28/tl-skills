@@ -1,0 +1,6 @@
+interface:
+  display_name: "Goal Griller"
+  short_description: "Interview vague ideas into verifiable agent goal specs"
+  default_prompt: "Use $tl-goal-griller to interview me one question at a time and turn my idea into a verifiable goal specification."
+policy:
+  allow_implicit_invocation: true
