@@ -1,0 +1,6 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Scoped, verified code review of a diff, PR, feature or codebase"
+  default_prompt: "Use $tl-code-review to review my current changes for bugs, regressions and merge risks."
+policy:
+  allow_implicit_invocation: true
