@@ -39,6 +39,14 @@ def static_finding(title, file, line, severity, message, fix, cwe="CWE-1104", ru
             "message": message, "fix": fix, "source": "deps"}
 
 
+def rel_manifest(root, src):
+    """Manifest path relative to the repo root, '/'-separated; unchanged if outside it."""
+    try:
+        return Path(src).resolve().relative_to(Path(root).resolve()).as_posix()
+    except (ValueError, OSError):
+        return src
+
+
 def line_of(text, needle):
     i = text.find(needle)
     return text.count("\n", 0, i) + 1 if i >= 0 else 1
@@ -163,7 +171,7 @@ def audit_osv(root):
                 vulns.append({"package": pk.get("name"), "version": pk.get("version"),
                               "ecosystem": pk.get("ecosystem"), "advisory": v.get("id"),
                               "summary": v.get("summary", "")[:160], "severity": SEV_MAP.get(str(sev).lower(), "medium"),
-                              "manifest": str(Path(src).relative_to(root)) if src.startswith(str(root)) else src,
+                              "manifest": rel_manifest(root, src),
                               "tool": "osv-scanner"})
     return {"tool": "osv-scanner", "status": "ran", "results": len(vulns)}, vulns
 

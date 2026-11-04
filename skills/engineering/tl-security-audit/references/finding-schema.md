@@ -10,6 +10,12 @@ passed to agents as `LANG`). Machine-read values stay exactly as specified here:
 numbers, field names, enum values, OWASP codes, CWE ids, rule ids, code excerpts. Markdown
 headings in surface.md / narrative stay in English (report headings are English by design).
 
+## Quoting code in free text
+Put every code or markup excerpt in a backtick code span. `findings.py` wraps stray `<`/`>` tokens
+in code spans when it renders `report.md` (`md_text`), but do not rely on it. Never copy secrets or
+PEM key headers; describe them ("PEM private-key header") with `file:line`. Convert `report.md` to
+HTML with raw HTML disabled (e.g. `--safe`); `render_html.py` already escapes it.
+
 ## Shard reviewer output — `<RUN_DIR>/findings/<SHARD_ID>.json`
 ```json
 {

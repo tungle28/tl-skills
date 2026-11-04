@@ -282,15 +282,23 @@ def score(f):
 _ANGLE_TOKEN = re.compile(r"[^\s`]*[<>][^\s`]*")
 
 
-def md_cell(value):
-    s = "-" if value is None else str(value)
-    s = re.sub(r"\s+", " ", s.replace("\\|", "|")).strip()  # re-escaped below: idempotent
+def md_text(value):
+    """Free text for a report bullet: `<`/`>` only inside code spans, so a reviewer-quoted
+    `<img src=x onerror=...>` or `<script>` never reaches report.md as a live tag (raw HTML passes
+    through most Markdown converters). Balanced backticks; idempotent."""
+    s = "" if value is None else str(value)
     if s.count("`") % 2:
         s = s.replace("`", "'")
     parts = s.split("`")  # even indexes are outside code spans
     for i in range(0, len(parts), 2):
         parts[i] = _ANGLE_TOKEN.sub(lambda m: f"`{m.group(0)}`", parts[i])
-    s = "`".join(parts).replace("|", "\\|")
+    return "`".join(parts)
+
+
+def md_cell(value):
+    s = "-" if value is None else str(value)
+    s = re.sub(r"\s+", " ", s.replace("\\|", "|")).strip()  # re-escaped below: idempotent
+    s = md_text(s).replace("|", "\\|")
     return s or "-"
 
 
@@ -642,18 +650,19 @@ def detail(f):
     extra = []
     if f.get("cwe"):
         extra.append(f["cwe"])
-    head = (f"#### {f['id']} · {f['title']}\n"
+    t = md_text
+    head = (f"#### {f['id']} · {t(f['title'])}\n"
             f"{loc(f)} · {f['owasp']} {OWASP_2025.get(f['owasp'], '')} · {' · '.join(extra) + ' · ' if extra else ''}"
             f"**{f['severity']}** · confidence {f['confidence']} · requires {f['requires']} · {f['kind']} · {f['status']}"
             + (f" · {f['delta']}" + (f" (was {f['baseline_id']})" if f.get("baseline_id") else "") if f.get("delta") else "")
             + "\n")
-    body = [f"- **Evidence:** {f['evidence']}", f"- **Attack scenario:** {f['attack_scenario']}",
-            f"- **Impact:** {f['impact']}", f"- **Fix:** {f['fix']}",
+    body = [f"- **Evidence:** {t(f['evidence'])}", f"- **Attack scenario:** {t(f['attack_scenario'])}",
+            f"- **Impact:** {t(f['impact'])}", f"- **Fix:** {t(f['fix'])}",
             f"- **Sources:** {', '.join(f['sources'])}" + (f" (hits {', '.join(f['from_hits'][:6])})" if f["from_hits"] else "")]
     if f.get("note"):
-        body.append(f"- **Note:** {f['note']}")
+        body.append(f"- **Note:** {t(f['note'])}")
     if f.get("verification_note"):
-        body.append(f"- **Verification:** {f['status']} — {f['verification_note']}")
+        body.append(f"- **Verification:** {f['status']} — {t(f['verification_note'])}")
     return head + "\n" + "\n".join(body) + "\n"
 
 

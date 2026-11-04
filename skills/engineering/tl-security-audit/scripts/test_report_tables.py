@@ -5,7 +5,9 @@
 """
 import unittest
 
-from findings import md_cell, normalize_md_tables, table
+import re
+
+from findings import detail, md_cell, md_text, normalize_md_tables, table
 
 HEAD = "| A | B |\n|---|---|\n"
 
@@ -73,6 +75,33 @@ class Repair(unittest.TestCase):
     def test_idempotent(self):
         t = table([["`x|y`", "List<int>", None, "a\nb"]], ["A", "B", "C", "D"])
         self.assertEqual(normalize_md_tables(t), (t, []))
+
+
+class FreeText(unittest.TestCase):
+    PAYLOADS = ["<img src=x onerror=alert(1)>", "<script>alert(1)</script>"]
+
+    def live_tags(self, s):
+        """Angle-bracket text left outside code spans."""
+        return re.findall(r"[<>]", "".join(s.split("`")[0::2]))
+
+    def test_md_text_wraps_tags(self):
+        for p in self.PAYLOADS:
+            self.assertEqual(self.live_tags(md_text(f"echo {p} done")), [])
+        self.assertEqual(md_text("keep `<b>` and a|b"), "keep `<b>` and a|b")
+
+    def test_md_text_idempotent(self):
+        for p in self.PAYLOADS:
+            once = md_text(p)
+            self.assertEqual(md_text(once), once)
+
+    def test_detail_has_no_live_tags(self):
+        for p in self.PAYLOADS:
+            f = {"id": "X-1", "title": f"t {p}", "file": "a.php", "line_start": 1, "line_end": 1,
+                 "owasp": "A05", "severity": "high", "confidence": "high", "requires": "none",
+                 "kind": "vulnerability", "status": "confirmed", "sources": ["r"], "from_hits": [],
+                 "evidence": p, "attack_scenario": p, "impact": p, "fix": p, "note": p,
+                 "verification_note": p}
+            self.assertEqual(self.live_tags(detail(f)), [])
 
 
 if __name__ == "__main__":

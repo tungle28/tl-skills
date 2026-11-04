@@ -14,7 +14,8 @@ installed too:
     `model: inherit` or a Cursor model ID, and has no `tools`/`skills` fields.
   - codex:  converted to Codex custom-agent TOML in .codex/agents/<name>.toml
     (name, description, developer_instructions = the Markdown body; model inherited).
-A skill's WORKFLOW.md is a guide for people reading the repository, so it is not installed.
+A skill's WORKFLOW.md and its rendered WORKFLOW.html are guides for people reading the repository,
+so they are not installed.
 Skills that only work on one tool (see PLATFORM_ONLY) are skipped for the others, with a note.
 Existing files that differ are never overwritten without --force.
 
