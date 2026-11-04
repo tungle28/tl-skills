@@ -1,0 +1,345 @@
+# Taint spec — C#: ASP.NET Core controllers, Minimal APIs, EF Core, Dapper, ADO.NET, HttpClient.
+# Value-typed action parameters (int, Guid, DateTime, bool, ...) are excluded as sources: they
+# cannot carry injection payloads, and including them is the main false-positive source.
+# Reserved metavariables: $SAFN $SAP $SARV $SATY $SARET $SABODY $SAE $SAO $SAX $SART
+language: csharp
+engine_languages: [csharp]
+inventory_languages: [csharp]
+example_ext: .cs
+function_scopes:
+  - |
+    $SARET $SAFN(..., $SATY $SAP, ...) { ... }
+  - |
+    $SARET $SAFN(..., $SATY $SAP, ...) => $SABODY;
+sources:
+  - patterns:   # public action parameters of MVC / API controllers
+      - pattern-inside: |
+          class $C : $BASE { ... }
+      - metavariable-regex: {metavariable: $BASE, regex: '(ControllerBase|Controller|PageModel)\b'}
+      - pattern-inside: |
+          public $RET $M(..., $T $P, ...) { ... }
+      - metavariable-regex: {metavariable: $T, regex: '^(?!(int|long|short|byte|uint|ulong|decimal|double|float|bool|Guid|DateTime|DateTimeOffset|DateOnly|TimeOnly|TimeSpan|CancellationToken|int\?|long\?|Guid\?|bool\?|DateTime\?)$)'}
+      - pattern: $P
+  - patterns:   # Minimal API lambdas
+      - pattern-inside: '$APP.$MAP($ROUTE, (..., $T $P, ...) => $BODY)'
+      - metavariable-regex: {metavariable: $MAP, regex: '^Map(Get|Post|Put|Delete|Patch|Methods)$'}
+      - metavariable-regex: {metavariable: $T, regex: '^(?!(int|long|Guid|bool|decimal|double|DateTime|CancellationToken|HttpContext|IDbConnection|DbContext|\w+Context|\w+Service|I\w+|ILogger.*)$)'}
+      - pattern: $P
+  - patterns:
+      - pattern-either:
+          - pattern: Request.$A
+          - pattern: HttpContext.Request.$A
+          - pattern: $CTX.Request.$A
+      - metavariable-regex: {metavariable: $A, regex: '^(Query|Form|Headers|Cookies|RouteValues|Body|QueryString|Path|Host)$'}
+sanitizers:
+  - pattern: int.Parse(...)
+  - pattern: long.Parse(...)
+  - pattern: Guid.Parse(...)
+  - pattern: decimal.Parse(...)
+  - pattern: Convert.ToInt32(...)
+  - pattern: Convert.ToInt64(...)
+  - pattern: Convert.ToDecimal(...)
+sinks:
+  sql-injection:
+    title: Untrusted input reaches a SQL query
+    owasp: A05
+    cwe: CWE-89
+    severity: high
+    message: Request data flows into raw SQL text. (FromSql/ExecuteSql with interpolation are parameterized and not sinks.)
+    fix: Use EF Core FromSql/ExecuteSql with an interpolated FormattableString, Dapper/ADO.NET parameters; allow-list identifiers.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $X.FromSqlRaw($Q, ...)
+              - pattern: $X.ExecuteSqlRaw($Q, ...)
+              - pattern: $X.ExecuteSqlRawAsync($Q, ...)
+              - pattern: $X.SqlQueryRaw<$T>($Q, ...)
+              - pattern: new SqlCommand($Q, ...)
+              - pattern: new NpgsqlCommand($Q, ...)
+              - pattern: new MySqlCommand($Q, ...)
+              - pattern: new SqlDataAdapter($Q, ...)
+              - pattern: $CMD.CommandText = $Q
+              - patterns:
+                  - pattern-either:
+                      - pattern: $C.$M($Q, ...)
+                      - pattern: $C.$M<$T>($Q, ...)
+                  - metavariable-regex: {metavariable: $M, regex: '^(Query|QueryAsync|QueryFirst|QueryFirstAsync|QueryFirstOrDefault|QueryFirstOrDefaultAsync|QuerySingle|QuerySingleAsync|QuerySingleOrDefault|QuerySingleOrDefaultAsync|QueryMultiple|QueryMultipleAsync|Execute|ExecuteAsync|ExecuteScalar|ExecuteScalarAsync|ExecuteReader|ExecuteReaderAsync)$'}
+          - focus-metavariable: $Q
+    examples:
+      bad: |
+        public class UsersController : ControllerBase {
+            [HttpGet]
+            public IActionResult Search(string name) {
+                var rows = _db.Users.FromSqlRaw($"SELECT * FROM Users WHERE Name = '{name}'").ToList();
+                return Ok(rows);
+            }
+        }
+      good: |
+        public class UsersController : ControllerBase {
+            [HttpGet]
+            public IActionResult Search(string name) {
+                var rows = _db.Users.FromSql($"SELECT * FROM Users WHERE Name = {name}").ToList();
+                return Ok(rows);
+            }
+        }
+  command-injection:
+    title: Untrusted input reaches a process command
+    owasp: A05
+    cwe: CWE-78
+    severity: critical
+    message: Request data selects the executable or reaches its arguments.
+    fix: Use a fixed executable with ProcessStartInfo.ArgumentList, UseShellExecute=false, and validated arguments.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Process.Start($X, ...)
+              - pattern: Process.Start($EXE, $X, ...)
+              - pattern: new ProcessStartInfo($EXE, $X, ...)
+              - pattern: new ProcessStartInfo($X, ...)
+              - patterns:  # only on a ProcessStartInfo: entities and DTOs have FileName properties too
+                  - pattern-either:
+                      - pattern: $PSI.FileName = $X
+                      - pattern: $PSI.Arguments = $X
+                  - pattern-either:
+                      - pattern-inside: |
+                          var $PSI = new ProcessStartInfo(...);
+                          ...
+                      - pattern-inside: |
+                          ProcessStartInfo $PSI = new ProcessStartInfo(...);
+                          ...
+          - focus-metavariable: $X
+    examples:
+      bad:
+        - |
+          public class ToolsController : ControllerBase {
+              public IActionResult Ping(string host) {
+                  Process.Start("cmd.exe", "/c ping " + host);
+                  return Ok();
+              }
+          }
+        - |
+          public class ToolsController : ControllerBase {
+              public IActionResult Convert(string tool) {
+                  var psi = new ProcessStartInfo();
+                  psi.FileName = tool;
+                  Process.Start(psi);
+                  return Ok();
+              }
+          }
+      good:
+        - |
+          public class ToolsController : ControllerBase {
+              public IActionResult Ping(string host) {
+                  Process.Start("ping", "-n 1 example.com");
+                  return Ok();
+              }
+          }
+        - |
+          public class DocumentsController : ControllerBase {
+              public IActionResult Rename(Guid id, DocumentRequest req) {
+                  var doc = new Document();
+                  doc.FileName = req.FileName;
+                  return Ok(doc);
+              }
+          }
+  path-traversal:
+    title: Untrusted input used as a file path
+    owasp: A01
+    cwe: CWE-22
+    severity: high
+    message: Request data flows into a filesystem path.
+    fix: Use Path.GetFileName and check Path.GetFullPath(result).StartsWith(baseDir + Path.DirectorySeparatorChar).
+    sanitizers:
+      - pattern: Path.GetFileName(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: File.$F($X, ...)
+                  - metavariable-regex: {metavariable: $F, regex: '^(ReadAllText|ReadAllTextAsync|ReadAllBytes|ReadAllBytesAsync|ReadAllLines|OpenRead|Open|OpenWrite|WriteAllText|WriteAllTextAsync|WriteAllBytes|Delete|Copy|Move|AppendAllText|Create)$'}
+              - patterns:
+                  - pattern: Directory.$F($X, ...)
+                  - metavariable-regex: {metavariable: $F, regex: '^(Delete|GetFiles|EnumerateFiles|CreateDirectory|Move)$'}
+              - pattern: new FileStream($X, ...)
+              - patterns:  # StreamReader/StreamWriter also take a Stream (the request body is not a path)
+                  - pattern-either:
+                      - pattern: new StreamReader($X, ...)
+                      - pattern: new StreamWriter($X, ...)
+                  - pattern-not: new $SR($R.Body, ...)
+                  - pattern-not: new $SR($R.Request.Body, ...)
+                  - pattern-not: new $SR($F.OpenReadStream(), ...)
+              - pattern: PhysicalFile($X, ...)
+              - pattern: Results.File($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        public class FilesController : ControllerBase {
+            public IActionResult Get(string name) {
+                return PhysicalFile(Path.Combine("/srv/files", name), "application/octet-stream");
+            }
+        }
+      good:
+        - |
+          public class FilesController : ControllerBase {
+              public IActionResult Get(string name) {
+                  return PhysicalFile(Path.Combine("/srv/files", Path.GetFileName(name)), "application/octet-stream");
+              }
+          }
+        - |
+          public class ImportController : ControllerBase {
+              public async Task<IActionResult> Post() {
+                  using var reader = new StreamReader(Request.Body);
+                  var text = await reader.ReadToEndAsync();
+                  return Ok(text.Length);
+              }
+          }
+  ssrf:
+    title: Untrusted input controls an outbound request URL
+    owasp: A01
+    cwe: CWE-918
+    severity: high
+    message: Request data flows into the URL of an HttpClient/WebClient request. (If only a path segment on a fixed BaseAddress is influenced, severity is lower — confirm.)
+    fix: Allow-list hosts; resolve and block internal/metadata addresses; keep caller input out of scheme/host.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: $HC.$M($X, ...)
+                  - metavariable-regex: {metavariable: $M, regex: '^(GetAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync|PostAsync|PutAsync|DeleteAsync|PatchAsync|GetFromJsonAsync|PostAsJsonAsync|PutAsJsonAsync|DownloadString|DownloadData|DownloadFile|DownloadStringTaskAsync|OpenRead)$'}
+              - pattern: new HttpRequestMessage($METHOD, $X)
+              - pattern: WebRequest.Create($X)
+              - pattern: new Uri($X)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        public class ProxyController : ControllerBase {
+            public async Task<IActionResult> Get(string url) {
+                var s = await _http.GetStringAsync(url);
+                return Ok(s);
+            }
+        }
+      good: |
+        public class ProxyController : ControllerBase {
+            public async Task<IActionResult> Get(int id) {
+                var s = await _http.GetStringAsync("https://api.example.com/items");
+                return Ok(s);
+            }
+        }
+  open-redirect:
+    title: Untrusted input controls a redirect target
+    owasp: A01
+    cwe: CWE-601
+    severity: medium
+    message: Request data decides where the browser is redirected.
+    fix: Use LocalRedirect / Url.IsLocalUrl or an allow-list of hosts.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Redirect($X)
+              - pattern: RedirectPermanent($X)
+              - pattern: Response.Redirect($X, ...)
+              - pattern: Results.Redirect($X, ...)
+              - pattern: new RedirectResult($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        public class AuthController : Controller {
+            public IActionResult Done(string returnUrl) {
+                return Redirect(returnUrl);
+            }
+        }
+      good: |
+        public class AuthController : Controller {
+            public IActionResult Done(string returnUrl) {
+                return LocalRedirect(returnUrl);
+            }
+        }
+  xss:
+    title: Untrusted input rendered as raw HTML
+    owasp: A05
+    cwe: CWE-79
+    severity: medium
+    message: Request data reaches Html.Raw / HtmlString / an HTML content result without encoding.
+    fix: Let Razor encode; sanitize with an allow-list sanitizer (HtmlSanitizer) before emitting raw HTML.
+    sanitizers:
+      - pattern: HtmlEncoder.Default.Encode(...)
+      - pattern: WebUtility.HtmlEncode(...)
+      - pattern: HttpUtility.HtmlEncode(...)
+      - pattern: $S.Sanitize(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Html.Raw($X)
+              - pattern: new HtmlString($X)
+              - pattern: Content($X, "text/html", ...)
+              - pattern: Results.Content($X, "text/html", ...)
+              - pattern: Response.WriteAsync($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        public class PageController : Controller {
+            public IActionResult Show(string msg) {
+                return Content("<p>" + msg + "</p>", "text/html");
+            }
+        }
+      good: |
+        public class PageController : Controller {
+            public IActionResult Show(string msg) {
+                return Content("<p>" + WebUtility.HtmlEncode(msg) + "</p>", "text/html");
+            }
+        }
+  ldap-injection:
+    title: Untrusted input reaches an LDAP filter
+    owasp: A05
+    cwe: CWE-90
+    severity: high
+    message: Request data is concatenated into an LDAP search filter.
+    fix: Escape filter values (RFC 4515) or build filters from validated components.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: new DirectorySearcher($X, ...)
+              - pattern: new DirectorySearcher($ROOT, $X, ...)
+              - pattern: $DS.Filter = $X
+              - pattern: new SearchRequest($DN, $X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        public class DirController : ControllerBase {
+            public IActionResult Find(string user) {
+                var s = new DirectorySearcher("(uid=" + user + ")");
+                return Ok();
+            }
+        }
+      good: |
+        public class DirController : ControllerBase {
+            public IActionResult Find(string user) {
+                var s = new DirectorySearcher("(objectClass=person)");
+                return Ok();
+            }
+        }
+crossfile_example:
+  expect: sql-injection
+  files:
+    Controllers/AccountsController.cs: |
+      public class AccountsController : ControllerBase {
+          private readonly IAccountService _svc;
+          [HttpGet("search")]
+          public async Task<IActionResult> Search([FromQuery] string term) {
+              return Ok(await _svc.SearchAsync(term, 50));
+          }
+      }
+    Services/AccountService.cs: |
+      public class AccountService : IAccountService {
+          private readonly AccountRepository _repo;
+          public Task<List<Account>> SearchAsync(string keyword, int take) {
+              return _repo.FindByNameAsync(keyword, take);
+          }
+      }
+    Data/AccountRepository.cs: |
+      public class AccountRepository {
+          private readonly AppDb _db;
+          public Task<List<Account>> FindByNameAsync(string name, int take) {
+              return _db.Accounts.FromSqlRaw("SELECT TOP " + take + " * FROM Accounts WHERE Name LIKE '%" + name + "%'").ToListAsync();
+          }
+      }

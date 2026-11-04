@@ -1,0 +1,324 @@
+# C# / ASP.NET Core / EF Core. Pattern rules are single-file, no taint: anything that needs
+# "where does this value come from?" is a gate, answered by the reviewer.
+rules:
+  # ------------------------------------------------------------------ injection (A05)
+  - id: cs-sql-raw-interpolated
+    title: Raw SQL built with interpolation or concatenation
+    languages: [csharp]
+    pattern: '\b(?:FromSqlRaw|ExecuteSqlRaw|ExecuteSqlRawAsync|SqlQueryRaw)\s*\(\s*(?:\$"|\$@"|@\$"|"[^"]*"\s*\+|[A-Za-z_]\w*\s*\+)'
+    severity: high
+    confidence: high
+    owasp: A05
+    cwe: CWE-89
+    message: EF Core *Raw methods do not parameterize interpolated or concatenated strings; values become SQL text.
+    fix: Use FromSql / ExecuteSql / SqlQuery with an interpolated FormattableString (EF parameterizes it) or pass explicit parameters.
+    examples:
+      bad: ['db.Users.FromSqlRaw($"SELECT * FROM Users WHERE Name = ''{name}''")', 'ctx.Database.ExecuteSqlRaw("DELETE FROM T WHERE Id = " + id)']
+      good: ['db.Users.FromSql($"SELECT * FROM Users WHERE Name = {name}")', 'db.Users.FromSqlRaw("SELECT * FROM Users WHERE Name = {0}", name)']
+
+  - id: cs-sqlcommand-concat
+    title: ADO.NET / Dapper command text built from strings
+    languages: [csharp]
+    pattern: '(?:new\s+Sql(?:Command|DataAdapter)\s*\(|\.CommandText\s*=|\.(?:Query|QueryAsync|QueryFirst\w*|QuerySingle\w*|Execute|ExecuteAsync|ExecuteScalar\w*)(?:<[^>]+>)?\s*\()\s*(?:\$"|\$@"|@\$"|"[^"]*"\s*\+\s*\w)'
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-89
+    message: Command text assembled from interpolation/concatenation is injectable unless every part is a trusted constant.
+    fix: Use parameters (@p with SqlParameter, or Dapper anonymous parameters); whitelist identifiers such as ORDER BY columns.
+    examples:
+      bad: ['var cmd = new SqlCommand($"SELECT * FROM Orders WHERE Id = {id}", conn);', 'conn.Query<User>("SELECT * FROM Users WHERE Name = ''" + name + "''")']
+      good: ['conn.Query<User>("SELECT * FROM Users WHERE Name = @name", new { name })']
+
+  - id: cs-process-start
+    title: Process started with non-constant arguments
+    type: gate
+    languages: [csharp]
+    pattern: '\bProcess\.Start\s*\(|\bnew\s+ProcessStartInfo\s*\('
+    owasp: A05
+    cwe: CWE-78
+    question: Can any part of the executable path or arguments come from a request, file, or message? If so, is it validated against an allow-list and passed without a shell (UseShellExecute=false, ArgumentList)?
+    examples:
+      bad: ['Process.Start("cmd.exe", "/c " + userInput);']
+
+  - id: cs-path-from-input
+    title: File path assembled near request input
+    type: gate
+    languages: [csharp]
+    pattern: '\b(?:Path\.Combine|File\.(?:ReadAll\w*|Open\w*|Delete|WriteAll\w*|Exists)|PhysicalFile|new\s+FileStream)\s*\('
+    file_requires: '\[(?:FromQuery|FromRoute|FromForm|FromBody)\]|IFormFile|Request\.(?:Query|Form|RouteValues)'
+    owasp: A01
+    cwe: CWE-22
+    question: Does a caller-controlled value reach this path? If so, is it reduced to a file name (Path.GetFileName) and is the final full path verified to stay inside the intended base directory?
+    examples:
+      bad: ['var p = Path.Combine(_root, fileName); // [FromQuery] string fileName']
+
+  - id: cs-html-raw
+    title: Html.Raw renders unencoded output
+    languages: [razor, csharp]
+    pattern: '@?Html\.Raw\s*\((?!\s*"[^"]*"\s*\))'
+    severity: medium
+    confidence: medium
+    owasp: A05
+    cwe: CWE-79
+    message: Html.Raw bypasses Razor's automatic HTML encoding; user-influenced content becomes stored/reflected XSS.
+    fix: Remove Html.Raw, or sanitize with an allow-list HTML sanitizer (e.g. HtmlSanitizer) before rendering.
+    examples:
+      bad: ['@Html.Raw(Model.Description)']
+      good: ['@Html.Raw("<br/>")', '@Model.Description']
+
+  # ------------------------------------------------------------------ deserialization / integrity (A08)
+  - id: cs-binaryformatter
+    title: BinaryFormatter / legacy insecure serializer
+    languages: [csharp]
+    pattern: '\bnew\s+(?:BinaryFormatter|NetDataContractSerializer|SoapFormatter|LosFormatter|ObjectStateFormatter)\s*\('
+    severity: high
+    confidence: high
+    owasp: A08
+    cwe: CWE-502
+    message: These serializers can instantiate arbitrary types from input and lead to remote code execution; BinaryFormatter is removed in .NET 9.
+    fix: Use System.Text.Json or another contract-based serializer with explicit types.
+    examples:
+      bad: ['var bf = new BinaryFormatter();']
+      good: ['JsonSerializer.Deserialize<Order>(json)']
+
+  - id: cs-newtonsoft-typenamehandling
+    title: Newtonsoft TypeNameHandling enables polymorphic deserialization
+    languages: [csharp]
+    pattern: 'TypeNameHandling\s*=\s*TypeNameHandling\.(?:All|Auto|Objects|Arrays)'
+    severity: high
+    confidence: medium
+    owasp: A08
+    cwe: CWE-502
+    message: With TypeNameHandling other than None, JSON input chooses which .NET type is created — a known remote code execution vector when input is untrusted.
+    fix: Use TypeNameHandling.None; if polymorphism is required, use a custom SerializationBinder with an explicit allow-list.
+    examples:
+      bad: ['new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.Auto }']
+      good: ['new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.None }']
+
+  # ------------------------------------------------------------------ crypto (A04)
+  - id: cs-weak-hash
+    title: MD5 / SHA1 used
+    languages: [csharp]
+    pattern: '\b(?:MD5|SHA1)(?:\.Create\s*\(|\.HashData\s*\(|CryptoServiceProvider\b|Managed\b)'
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-328
+    message: MD5/SHA1 are broken for collision resistance and far too fast for password hashing.
+    fix: For passwords use PasswordHasher<T>, PBKDF2 (Rfc2898DeriveBytes.Pbkdf2 with high iterations), bcrypt or Argon2; for integrity use SHA-256+; ignore if used only for non-security checksums (then document it).
+    examples:
+      bad: ['using var md5 = MD5.Create();', 'var h = SHA1.HashData(bytes);']
+      good: ['var h = SHA256.HashData(bytes);']
+
+  - id: cs-insecure-random
+    title: System.Random used for a security value
+    languages: [csharp]
+    pattern: '\bnew\s+Random\s*\(|\bRandom\.Shared\b'
+    file_requires: '(?i)(token|otp|password|secret|salt|nonce|reset|verification|apikey)'
+    severity: medium
+    confidence: low
+    owasp: A04
+    cwe: CWE-338
+    message: System.Random is predictable; values used as tokens, OTPs or salts can be guessed.
+    fix: Use RandomNumberGenerator.GetBytes / GetInt32.
+    examples:
+      bad: ['var otp = new Random().Next(100000, 999999); // reset token']
+      good: ['var otp = RandomNumberGenerator.GetInt32(100000, 1000000); // reset token']
+
+  - id: cs-tls-validation-disabled
+    title: TLS certificate validation disabled
+    languages: [csharp]
+    pattern: '(?:ServerCertificateCustomValidationCallback|ServerCertificateValidationCallback|RemoteCertificateValidationCallback)\s*[=+]+\s*(?:\([^)]*\)|\w+|delegate[^{]*)\s*(?:=>|\{\s*return)\s*true|DangerousAcceptAnyServerCertificateValidator'
+    severity: high
+    confidence: high
+    owasp: A04
+    cwe: CWE-295
+    message: Accepting any certificate allows man-in-the-middle interception of this connection.
+    fix: Remove the override; for private CAs, validate against a pinned CA/thumbprint instead of returning true.
+    examples:
+      bad: ['handler.ServerCertificateCustomValidationCallback = (m, c, ch, e) => true;', 'ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator']
+      good: ['handler.ServerCertificateCustomValidationCallback = ValidateAgainstPinnedCa;']
+
+  # ------------------------------------------------------------------ authentication (A07)
+  - id: cs-jwt-validation-disabled
+    title: JWT validation parameter disabled
+    languages: [csharp]
+    pattern: '\b(?:ValidateIssuerSigningKey|ValidateLifetime|RequireSignedTokens|RequireExpirationTime)\s*=\s*false|\bValidateIssuer\s*=\s*false|\bValidateAudience\s*=\s*false'
+    severity: high
+    confidence: medium
+    owasp: A07
+    cwe: CWE-347
+    message: Disabling signature, lifetime, issuer or audience validation lets forged, expired or cross-service tokens authenticate.
+    fix: Keep all validations on; configure ValidIssuer/ValidAudience(s) explicitly. Disabling issuer/audience is occasionally deliberate for multi-tenant IdPs — then validate them in a custom validator.
+    examples:
+      bad: ['ValidateLifetime = false,', 'ValidateIssuerSigningKey = false']
+      good: ['ValidateLifetime = true,']
+
+  - id: cs-require-https-metadata-off
+    title: RequireHttpsMetadata disabled
+    languages: [csharp]
+    pattern: 'RequireHttpsMetadata\s*=\s*false'
+    context_not: '(?i)IsDevelopment\(\)'
+    severity: medium
+    confidence: medium
+    owasp: A07
+    cwe: CWE-319
+    message: OIDC metadata and signing keys fetched over plain HTTP can be tampered with.
+    fix: Only disable in development (guard with env.IsDevelopment()).
+    examples:
+      bad: ['o.RequireHttpsMetadata = false;']
+      good: ['o.RequireHttpsMetadata = !env.IsDevelopment();']
+
+  - id: cs-cookie-insecure
+    title: Auth/session cookie without Secure or HttpOnly
+    languages: [csharp]
+    pattern: '\b(?:HttpOnly\s*=\s*false|SecurePolicy\s*=\s*CookieSecurePolicy\.(?:None|SameAsRequest)|Secure\s*=\s*false)'
+    severity: medium
+    confidence: medium
+    owasp: A07
+    cwe: CWE-614
+    message: Without Secure, the cookie can leak over HTTP; without HttpOnly, any XSS can steal it.
+    fix: Set HttpOnly = true, SecurePolicy = Always, and an explicit SameSite (Lax or Strict).
+    examples:
+      bad: ['options.Cookie.HttpOnly = false;', 'o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;']
+      good: ['options.Cookie.HttpOnly = true;']
+
+  # ------------------------------------------------------------------ access control (A01) — gates
+  - id: cs-allow-anonymous
+    title: Endpoint explicitly allows anonymous access
+    type: gate
+    languages: [csharp]
+    pattern: '\[AllowAnonymous\]|\.AllowAnonymous\s*\(\s*\)'
+    owasp: A01
+    cwe: CWE-306
+    question: Is this endpoint meant to be public? If yes, what does it expose or allow for an anonymous caller, and is it rate-limited? If it sits on a controller with [Authorize], confirm the override is intended.
+    examples:
+      bad: ['[AllowAnonymous]']
+
+  - id: cs-action-id-param
+    title: Controller action takes an object id
+    type: gate
+    languages: [csharp]
+    pattern: '^\s*public\s+(?:async\s+)?(?:Task<)?(?:IActionResult|ActionResult|IResult|Results<)[^(]*\(\s*[^)]*?\b(?:int|long|Guid|string)\s+\w*(?:[iI]d|Code|No)\b'
+    file_requires: '\[(?:ApiController|Http(?:Get|Put|Delete|Patch|Post)|Route)\b|ControllerBase|\bController\b'
+    owasp: A01
+    cwe: CWE-639
+    question: Can the caller supply an id for a record they do not own (another user, customer, tenant, account)? Find where ownership/tenant is enforced — policy, filter, service or query — or state that it is not.
+    guidance: Walk route/filters → service → query; check sibling actions in the same controller for the pattern they use.
+    examples:
+      bad: ["    [HttpGet(\"{accountId}\")]\n    public async Task<IActionResult> GetStatement(Guid accountId)", "    [HttpDelete]\n    public IActionResult Delete(int id)"]
+      good: ["    [HttpGet]\n    public IActionResult Index()"]
+
+  - id: cs-minimal-api-no-auth
+    title: Minimal API endpoint without authorization call
+    type: gate
+    languages: [csharp]
+    pattern: '\b(?:app|group|api)\.Map(?:Get|Post|Put|Delete|Patch)\s*\('
+    pattern_not: 'RequireAuthorization|AllowAnonymous'
+    owasp: A01
+    cwe: CWE-862
+    question: Is authorization applied to this endpoint (chained RequireAuthorization, a group-level policy, a fallback policy in AddAuthorization) or is it reachable anonymously by design?
+    examples:
+      bad: ['app.MapGet("/api/accounts/{id}", GetAccount);']
+      good: ['app.MapGet("/api/accounts/{id}", GetAccount).RequireAuthorization("Owner");']
+
+  - id: cs-antiforgery-ignored
+    title: Antiforgery validation disabled
+    languages: [csharp]
+    pattern: '\[IgnoreAntiforgeryToken\]|\.DisableAntiforgery\s*\(\s*\)'
+    severity: medium
+    confidence: low
+    owasp: A01
+    cwe: CWE-352
+    message: Cookie-authenticated state-changing endpoints without antiforgery validation are exposed to CSRF.
+    fix: Keep antiforgery on for cookie-auth form/API endpoints; it is fine to omit for pure bearer-token APIs — confirm which applies.
+    examples:
+      bad: ['[IgnoreAntiforgeryToken]']
+
+  - id: cs-open-redirect
+    title: Redirect to a caller-supplied URL
+    type: gate
+    languages: [csharp]
+    pattern: '\bRedirect\s*\(\s*(?:returnUrl|redirectUrl|url|next|target)\b'
+    owasp: A01
+    cwe: CWE-601
+    question: Is the target validated as local (Url.IsLocalUrl / LocalRedirect) or against an allow-list of hosts?
+    examples:
+      bad: ['return Redirect(returnUrl);']
+      good: ['return LocalRedirect(returnUrl);']
+
+  # ------------------------------------------------------------------ misconfiguration (A02) / errors (A10)
+  - id: cs-cors-any-origin-credentials
+    title: CORS reflects any origin with credentials
+    languages: [csharp]
+    pattern: 'SetIsOriginAllowed\s*\(\s*\w+\s*=>\s*true\s*\)'
+    file_requires: 'AllowCredentials\s*\('
+    severity: high
+    confidence: high
+    owasp: A02
+    cwe: CWE-942
+    message: Allowing every origin while sending credentials lets any website make authenticated requests and read responses as the user.
+    fix: Use an explicit allow-list of origins (WithOrigins) from configuration.
+    examples:
+      bad: ['policy.SetIsOriginAllowed(_ => true).AllowCredentials();']
+      good: ['policy.WithOrigins(allowed).AllowCredentials();']
+
+  - id: cs-developer-exception-page
+    title: Developer exception page not gated by environment
+    languages: [csharp]
+    pattern: '\bUseDeveloperExceptionPage\s*\(\s*\)'
+    context_not: 'IsDevelopment\s*\(\s*\)'
+    context_lines: 4
+    severity: medium
+    confidence: medium
+    owasp: A10
+    cwe: CWE-209
+    message: The developer exception page shows stack traces, source snippets and configuration to any caller.
+    fix: Enable it only inside `if (app.Environment.IsDevelopment())`; use UseExceptionHandler + ProblemDetails elsewhere.
+    examples:
+      bad: ['app.UseDeveloperExceptionPage();']
+      good: ["if (app.Environment.IsDevelopment())\n{\n    app.UseDeveloperExceptionPage();\n}"]
+
+  - id: cs-xml-dtd-processing
+    title: XML parser allows DTD / external entities
+    languages: [csharp]
+    pattern: 'DtdProcessing\s*=\s*DtdProcessing\.Parse|XmlResolver\s*=\s*new\s+XmlUrlResolver'
+    severity: high
+    confidence: high
+    owasp: A02
+    cwe: CWE-611
+    message: DTD parsing with a resolver enables XXE — local file disclosure and SSRF through crafted XML.
+    fix: Use DtdProcessing.Prohibit (default in modern .NET) and XmlResolver = null.
+    examples:
+      bad: ['settings.DtdProcessing = DtdProcessing.Parse;']
+      good: ['settings.DtdProcessing = DtdProcessing.Prohibit;']
+
+  - id: cs-exception-leak
+    title: Exception details returned to the client
+    languages: [csharp]
+    pattern: '(?:return\s+(?:BadRequest|StatusCode|Problem|Ok|Json)\s*\([^;]*|Results\.\w+\s*\([^;]*)\b(?:ex|e|exception)\.(?:Message|StackTrace|ToString\s*\(\s*\))'
+    severity: low
+    confidence: medium
+    owasp: A10
+    cwe: CWE-209
+    message: Raw exception text can disclose SQL, paths, internal hostnames or library versions.
+    fix: Log the exception server-side with a correlation id; return a generic ProblemDetails with that id.
+    examples:
+      bad: ['return BadRequest(ex.Message);', 'return StatusCode(500, e.ToString());']
+      good: ['return Problem(title: "Unexpected error", extensions: new() { ["traceId"] = traceId });']
+
+  - id: cs-catch-swallow
+    title: Empty catch block
+    languages: [csharp]
+    pattern: 'catch(?:\s*\([^)]*\))?\s*\{\s*\}'
+    file_requires: '(?i)(authoriz|authentic|permission|payment|transfer|balance|signature|validate|verify)'
+    severity: low
+    confidence: low
+    owasp: A10
+    cwe: CWE-390
+    message: Swallowing exceptions in security- or money-relevant code can make a check fail open silently.
+    fix: Handle explicitly — deny/abort on failure, log with context, and surface an error.
+    examples:
+      bad: ['try { Verify(sig); } catch { }']
+      good: ['catch (Exception ex) { _log.LogError(ex, "verify failed"); throw; }']

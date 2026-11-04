@@ -1,0 +1,168 @@
+rules:
+  - id: py-sql-format
+    title: SQL built with f-string, % or .format
+    languages: [python]
+    pattern: '\.(?:execute|executemany|raw|text)\s*\(\s*(?:f"[^"]*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b[^"]*\{|f''[^'']*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b[^'']*\{|"[^"]*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b[^"]*"\s*(?:%|\.format\s*\(|\+)|''[^'']*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b[^'']*''\s*(?:%|\.format\s*\(|\+))'
+    ignore_case: true
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-89
+    message: Formatting values into SQL text makes them executable SQL.
+    fix: Pass parameters separately (cursor.execute(sql, params), SQLAlchemy bound parameters / text() with :name).
+    examples:
+      bad: ['cur.execute(f"SELECT * FROM users WHERE id = {uid}")', 'cur.execute("DELETE FROM t WHERE id = %s" % tid)',
+            'conn.execute("SELECT * FROM users WHERE name = ''" + q + "''")', "cur.execute('SELECT * FROM t WHERE a = \"' + a + '\"')"]
+      good: ['cur.execute("SELECT * FROM users WHERE id = %s", (uid,))', 'cur.execute("SELECT * FROM t WHERE a = ''x''", ())']
+
+  - id: py-shell-true
+    title: subprocess with shell=True / os.system
+    languages: [python]
+    pattern: '\bsubprocess\.\w+\((?:[^()\n]|\([^()\n]*\))*\bshell\s*=\s*True|\bos\.(?:system|popen)\s*\('
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-78
+    message: Commands run through a shell; any interpolated input can inject commands.
+    fix: Pass an argument list with shell=False; validate inputs; use shlex.quote only as a last resort.
+    examples:
+      bad: ['subprocess.run(f"tar xf {name}", shell=True)', 'os.system("rm " + path)',
+            'subprocess.call(request.args.get("cmd"), shell=True)']
+      good: ['subprocess.run(["tar", "xf", name])', 'subprocess.run(get_args(x), shell=False)']
+
+  - id: py-eval-exec
+    title: eval / exec on dynamic input
+    languages: [python]
+    pattern: '(?<![\w.])(?:eval|exec)\s*\((?!\s*[''"])'
+    severity: high
+    confidence: low
+    owasp: A05
+    cwe: CWE-95
+    message: eval/exec run arbitrary Python.
+    fix: Use ast.literal_eval for literals or an explicit parser/dispatch table.
+    examples:
+      bad: ['result = eval(expr)']
+      good: ['result = ast.literal_eval(expr)']
+
+  - id: py-unsafe-deserialization
+    title: Unsafe deserialization (pickle / yaml.load / marshal)
+    languages: [python]
+    pattern: '\b(?:pickle|cPickle|dill|shelve|marshal)\.loads?\s*\(|\byaml\.load\s*\((?![^)]*Loader\s*=\s*(?:yaml\.)?(?:Safe|CSafe)Loader)|\byaml\.unsafe_load\s*\('
+    severity: high
+    confidence: medium
+    owasp: A08
+    cwe: CWE-502
+    message: Loading pickle/marshal or yaml.load with the full loader can execute code embedded in the data.
+    fix: Use JSON or yaml.safe_load; never unpickle data that crosses a trust boundary.
+    examples:
+      bad: ['obj = pickle.loads(request.data)', 'cfg = yaml.load(f)']
+      good: ['cfg = yaml.safe_load(f)', 'cfg = yaml.load(f, Loader=yaml.SafeLoader)']
+
+  - id: py-requests-verify-false
+    title: TLS verification disabled in requests/httpx
+    languages: [python]
+    pattern: '\bverify\s*=\s*False'
+    severity: high
+    confidence: high
+    owasp: A04
+    cwe: CWE-295
+    message: Certificate verification is disabled, allowing man-in-the-middle attacks.
+    fix: Remove verify=False; pass verify="/path/to/ca.pem" for private CAs.
+    examples:
+      bad: ['requests.get(url, verify=False)']
+      good: ['requests.get(url, verify="/etc/ssl/internal-ca.pem")']
+
+  - id: py-weak-hash
+    title: MD5 / SHA1 hashing
+    languages: [python]
+    pattern: '\bhashlib\.(?:md5|sha1)\s*\((?![^)]*usedforsecurity\s*=\s*False)'
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-328
+    message: MD5/SHA1 are not acceptable for passwords or signatures.
+    fix: Use argon2/bcrypt (passlib) for passwords, sha256+ or HMAC for integrity; mark checksum-only use with usedforsecurity=False.
+    examples:
+      bad: ['hashlib.md5(password.encode())']
+      good: ['hashlib.md5(data, usedforsecurity=False)']
+
+  - id: py-insecure-random
+    title: random module used for security values
+    languages: [python]
+    pattern: '\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\('
+    file_requires: '(?i)(token|otp|password|secret|salt|nonce|reset|session|apikey)'
+    severity: medium
+    confidence: low
+    owasp: A04
+    cwe: CWE-338
+    message: The random module is predictable.
+    fix: Use the secrets module (secrets.token_urlsafe, secrets.randbelow).
+    examples:
+      bad: ['otp = random.randint(100000, 999999)  # reset code']
+      good: ['otp = secrets.randbelow(900000) + 100000  # reset code']
+
+  - id: py-debug-enabled
+    title: Debug mode enabled
+    languages: [python]
+    pattern: '^\s*DEBUG\s*=\s*True\b|\.run\s*\([^)]*debug\s*=\s*True'
+    severity: medium
+    confidence: medium
+    owasp: A02
+    cwe: CWE-489
+    message: Django/Flask debug mode exposes stack traces, settings and (Werkzeug) an interactive console.
+    fix: Drive DEBUG from environment and default to False.
+    examples:
+      bad: ['DEBUG = True', 'app.run(host="0.0.0.0", debug=True)']
+      good: ['DEBUG = os.getenv("DEBUG") == "1"']
+
+  - id: py-jwt-no-verify
+    title: PyJWT signature verification disabled
+    languages: [python]
+    pattern: 'verify_signature["'']\s*:\s*False|\bverify\s*=\s*False[^)]*\)|algorithms\s*=\s*\[[^\]]*["'']none["'']'
+    file_requires: '\bjwt\b'
+    severity: high
+    confidence: medium
+    owasp: A07
+    cwe: CWE-347
+    message: Tokens are accepted without signature verification or with alg "none".
+    fix: Always verify with a pinned algorithms list and the correct key.
+    examples:
+      bad: ['jwt.decode(t, options={"verify_signature": False})']
+      good: ['jwt.decode(t, key, algorithms=["RS256"])']
+
+  - id: py-mark-safe
+    title: Template output marked safe
+    languages: [python, html]
+    pattern: '\bmark_safe\s*\(|\|\s*safe\b|Markup\s*\((?!\s*[''"])'
+    severity: medium
+    confidence: low
+    owasp: A05
+    cwe: CWE-79
+    message: Marking content safe disables auto-escaping; user-influenced content becomes XSS.
+    fix: Sanitize with an allow-list sanitizer (bleach/nh3) before marking safe, or keep auto-escaping.
+    examples:
+      bad: ['return mark_safe(comment.body)', '{{ post.body|safe }}']
+      good: ['{{ post.body }}']
+
+  - id: py-ssrf-request
+    title: Outbound request to a request-derived URL
+    type: gate
+    languages: [python]
+    pattern: '\b(?:requests|httpx|urllib\.request|aiohttp\.ClientSession\(\))\.(?:get|post|put|request|urlopen)\s*\(\s*(?:request\.|url\b|target\b|callback\b|webhook)'
+    owasp: A01
+    cwe: CWE-918
+    question: Can the caller choose the host? If so, is there a host allow-list and a block on internal/metadata addresses after DNS resolution?
+    examples:
+      bad: ['requests.get(request.args["url"])']
+
+  - id: py-route-id-param
+    title: Route with an object id parameter
+    type: gate
+    languages: [python]
+    pattern: '@(?:app|router|bp|blueprint|api)\.(?:get|put|patch|delete|post|route)\s*\(\s*[''"][^''"]*[<{]\s*(?:\w+:)?\w*(?:id|_id|code)\s*[>}]'
+    ignore_case: true
+    owasp: A01
+    cwe: CWE-639
+    question: Is the id checked against the current user / tenant before it is used (dependency, decorator, query filter)?
+    examples:
+      bad: ['@app.get("/accounts/{account_id}")', '@bp.route("/orders/<int:order_id>")']

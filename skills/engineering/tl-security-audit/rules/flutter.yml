@@ -1,0 +1,267 @@
+# Flutter / Dart client code, plus the native Android/iOS configuration shipped with the app.
+# Mobile threat model: the app binary and device storage are in the attacker's hands — anything
+# embedded or stored unprotected can be extracted; every server-side control must stand on its own.
+rules:
+  # ------------------------------------------------------------------ transport (A04)
+  - id: dart-bad-certificate-callback
+    title: TLS certificate validation disabled
+    languages: [dart]
+    pattern: '\bbadCertificateCallback\s*=\s*\([^)]*\)\s*(?:=>\s*true|\{\s*return\s+true\s*;)|onBadCertificate\s*=\s*\([^)]*\)\s*=>\s*true'
+    severity: high
+    confidence: high
+    owasp: A04
+    cwe: CWE-295
+    message: Accepting any certificate lets anyone on the network (public Wi-Fi, proxy) read and modify API traffic, including tokens.
+    fix: Remove the override. For private CAs, trust a pinned certificate via SecurityContext; consider certificate/public-key pinning for banking apps.
+    examples:
+      bad: ['client.badCertificateCallback = (cert, host, port) => true;', "(client as HttpClient).badCertificateCallback = (X509Certificate c, String h, int p) { return true; };"]
+      good: ['client.badCertificateCallback = (cert, host, port) => cert.sha256 == pinned;']
+
+  - id: dart-cleartext-url
+    title: Cleartext HTTP endpoint
+    languages: [dart]
+    pattern: '[''"]http://(?!localhost|127\.0\.0\.1|10\.0\.2\.2|0\.0\.0\.0|\[::1\]|schemas\.|www\.w3\.org)[^''"\s]+[''"]'
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-319
+    message: Requests over plain HTTP expose credentials and data to network attackers.
+    fix: Use HTTPS; keep http:// only for local emulators behind a debug flag.
+    examples:
+      bad: ["const baseUrl = 'http://api.example.com/v1';"]
+      good: ["const baseUrl = 'https://api.example.com/v1';", "const dev = 'http://10.0.2.2:8080';"]
+
+  # ------------------------------------------------------------------ local storage / secrets (A04)
+  - id: dart-insecure-token-storage
+    title: Sensitive value stored in SharedPreferences / plain storage
+    languages: [dart]
+    pattern: '\.(?:setString|setStringList)\s*\(\s*[''"][^''"]*(?:token|jwt|password|passwd|secret|pin|session|refresh|otp|private)[^''"]*[''"]|\b(?:GetStorage|Hive\.box|box)\s*\([^)]*\)\s*\.(?:write|put)\s*\(\s*[''"][^''"]*(?:token|password|pin|secret)'
+    ignore_case: true
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-922
+    message: SharedPreferences/Hive/GetStorage are unencrypted files readable on rooted/jailbroken devices and from some backups.
+    fix: Store tokens and secrets with flutter_secure_storage (Keychain / Android Keystore-backed EncryptedSharedPreferences); keep tokens short-lived.
+    examples:
+      bad: ["await prefs.setString('access_token', token);", "Hive.box('auth').put('refreshToken', t);"]
+      good: ["await secureStorage.write(key: 'access_token', value: token);", "await prefs.setString('theme', 'dark');"]
+
+  - id: dart-insecure-random
+    title: dart:math Random used for a security value
+    languages: [dart]
+    pattern: '\bRandom\s*\(\s*\d*\s*\)(?!\.secure)'
+    pattern_not: 'Random\.secure'
+    file_requires: '(?i)(token|otp|password|secret|salt|nonce|iv\b|key|session)'
+    severity: medium
+    confidence: low
+    owasp: A04
+    cwe: CWE-338
+    message: Random() is not cryptographically secure.
+    fix: Use Random.secure() (or package:cryptography) for keys, IVs, nonces and tokens.
+    examples:
+      bad: ["final nonce = List.generate(16, (_) => Random().nextInt(256)); // iv"]
+      good: ["final nonce = List.generate(16, (_) => Random.secure().nextInt(256)); // iv"]
+
+  - id: dart-weak-hash
+    title: MD5 / SHA1 hashing
+    languages: [dart]
+    pattern: '\b(?:md5|sha1)\.convert\s*\('
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-328
+    message: MD5/SHA1 are broken for security purposes (password hashing, signatures, request signing).
+    fix: Use sha256/HMAC-SHA256 for integrity; never hash passwords on the client as a substitute for server-side hashing.
+    examples:
+      bad: ['final h = md5.convert(utf8.encode(password)).toString();']
+      good: ['final h = sha256.convert(bytes);']
+
+  - id: dart-hardcoded-crypto-key
+    title: Hardcoded encryption key / IV
+    languages: [dart]
+    pattern: '\b(?:Key|IV)\.from(?:Utf8|Base64|Base16)\s*\(\s*[''"][^''"]{8,}[''"]'
+    severity: high
+    confidence: medium
+    owasp: A04
+    cwe: CWE-321
+    message: A key embedded in the app binary can be extracted by anyone; data "encrypted" with it is effectively plaintext to an attacker.
+    fix: Generate keys per device and keep them in the platform keystore (flutter_secure_storage), or perform the crypto server-side.
+    examples:
+      bad: ["final key = Key.fromUtf8('my32lengthsupersecretnooneknows1');", "final iv = IV.fromUtf8('1234567890123456');"]
+      good: ['final key = Key.fromSecureRandom(32);']
+
+  # ------------------------------------------------------------------ injection / webview (A05)
+  - id: dart-sqflite-raw-interpolation
+    title: Raw SQL with string interpolation (sqflite / drift)
+    languages: [dart]
+    pattern: '\.(?:rawQuery|rawInsert|rawUpdate|rawDelete|execute|customSelect|customStatement)\s*\(\s*(?:''[^'']*\$|"[^"]*\$|''[^'']*''\s*\+|"[^"]*"\s*\+)'
+    severity: medium
+    confidence: medium
+    owasp: A05
+    cwe: CWE-89
+    message: Interpolated values become SQL; on-device SQLite injection can corrupt or leak locally cached data and is often reachable via deep links or synced content.
+    fix: Use `?` placeholders with the arguments list (rawQuery(sql, [value])) or the query builder (db.query(where:, whereArgs:)).
+    examples:
+      bad: ["await db.rawQuery('SELECT * FROM notes WHERE title = \"$title\"');", "db.rawDelete('DELETE FROM t WHERE id = ' + id);"]
+      good: ["await db.rawQuery('SELECT * FROM notes WHERE title = ?', [title]);"]
+
+  - id: dart-webview-js
+    title: WebView with JavaScript / JS bridge enabled
+    type: gate
+    languages: [dart]
+    pattern: '\bJavaScriptMode\.unrestricted\b|\bjavascriptMode\s*:\s*JavascriptMode\.unrestricted|\baddJavaScriptChannel\s*\(|\bjavascriptChannels\s*:|\baddJavaScriptHandler\s*\(|javaScriptEnabled\s*:\s*true'
+    owasp: A05
+    cwe: CWE-749
+    question: Which URLs can this WebView load — only your own HTTPS origins, or anything (deep-link parameters, server data, redirects)? Does a JS channel/handler expose tokens or native actions to page scripts? Is navigation restricted (NavigationDelegate / shouldOverrideUrlLoading)?
+    examples:
+      bad: ['controller.setJavaScriptMode(JavaScriptMode.unrestricted);', "controller.addJavaScriptChannel('Bridge', onMessageReceived: handle);"]
+
+  - id: dart-webview-load-variable
+    title: WebView loads a variable URL / HTML
+    type: gate
+    languages: [dart]
+    pattern: '\bload(?:Request|Url|HtmlString|File)\s*\((?!\s*(?:Uri\.parse\s*\(\s*)?[''"])\s*(?:Uri\.parse\s*\(\s*)?[A-Za-z_]'
+    file_requires: 'WebView|InAppWebView|webview_flutter'
+    owasp: A05
+    cwe: CWE-79
+    question: Can the URL or HTML come from outside the app (deep link, push notification, API response, user input)? If so, is it validated against an allow-list of hosts before loading?
+    examples:
+      bad: ["// WebViewController\ncontroller.loadRequest(Uri.parse(link));", "// WebView\ncontroller.loadHtmlString(html);"]
+      good: ["// WebViewController\ncontroller.loadRequest(Uri.parse('https://app.example.com/help'));"]
+
+  # ------------------------------------------------------------------ deep links / navigation (A01)
+  - id: dart-deep-link-handler
+    title: Deep link / app link handler
+    type: gate
+    languages: [dart]
+    pattern: '\b(?:uriLinkStream|getInitialUri|getInitialLink|getInitialAppLink|linkStream|onLink|getInitialMessage|onMessageOpenedApp)\b|\bAppLinks\s*\(\s*\)|FirebaseDynamicLinks\.instance'
+    owasp: A01
+    cwe: CWE-939
+    question: Are link parameters treated as untrusted — validated before navigation, never auto-executing sensitive actions (payments, transfers, account changes) without an in-app confirmation and an authenticated session? Are App Links / Universal Links verified (assetlinks.json / apple-app-site-association) rather than custom schemes other apps can register?
+    examples:
+      bad: ['_sub = appLinks.uriLinkStream.listen((uri) => router.go(uri.path));', 'final msg = await FirebaseMessaging.instance.getInitialMessage();']
+
+  - id: dart-client-side-authz
+    title: Authorization decision made in the client
+    type: gate
+    languages: [dart]
+    pattern: '\bif\s*\(\s*[\w.?!]*\b(?:(?:isAdmin|isPremium|isVip|isStaff|canApprove|hasPermission)\b|role\s*==)'
+    owasp: A01
+    cwe: CWE-602
+    question: The app hides or shows features based on this flag — does the backend enforce the same rule on every API the feature calls? Client checks can be patched out of the binary or bypassed by calling the API directly.
+    examples:
+      bad: ['if (user.isAdmin) { showApproveButton(); }', "if (profile.role == 'manager') {"]
+
+  # ------------------------------------------------------------------ logging / debug (A09, A02)
+  - id: dart-log-sensitive
+    title: Sensitive value printed to logs
+    languages: [dart]
+    pattern: '\b(?:print|debugPrint|log|logger\.\w+|developer\.log)\s*\([^;]*\b(?:token|password|passwd|otp|pin|secret|authorization|cookie|cardNumber)\b'
+    ignore_case: true
+    severity: low
+    confidence: medium
+    owasp: A09
+    cwe: CWE-532
+    message: Device logs are readable via adb/Console by anyone with the device, and by crash/analytics SDKs.
+    fix: Remove the log or guard it with kDebugMode and redact the value.
+    examples:
+      bad: ["debugPrint('login ok, token=$token');", "print('otp: ' + otp);"]
+      good: ["debugPrint('login ok');"]
+
+  - id: dart-dio-log-bodies
+    title: HTTP client logs request/response bodies
+    languages: [dart]
+    pattern: '\bLogInterceptor\s*\([^)]*\b(?:requestBody|responseBody|requestHeader)\s*:\s*true|\bPrettyDioLogger\s*\('
+    context_not: 'kDebugMode|kReleaseMode|isDebug|\bif\s*\(\s*!?\s*kReleaseMode'
+    context_lines: 4
+    severity: low
+    confidence: medium
+    owasp: A09
+    cwe: CWE-532
+    message: Logging headers/bodies writes tokens and personal data to device logs in release builds.
+    fix: Add the interceptor only when kDebugMode is true.
+    examples:
+      bad: ['dio.interceptors.add(LogInterceptor(requestBody: true, responseBody: true));']
+      good: ["if (kDebugMode) {\n  dio.interceptors.add(LogInterceptor(requestBody: true, responseBody: true));\n}"]
+
+  # ------------------------------------------------------------------ Android configuration
+  - id: android-debuggable
+    title: Android app marked debuggable
+    languages: [xml, groovy, kotlin]
+    pattern: 'android:debuggable\s*=\s*"true"|\bdebuggable\s*(?:=\s*)?true\b'
+    paths: {include: ["*AndroidManifest.xml", "*build.gradle", "*build.gradle.kts"]}
+    context_not: '\bdebug\s*\{'
+    context_lines: 2
+    severity: high
+    confidence: medium
+    owasp: A02
+    cwe: CWE-489
+    message: A debuggable release build lets anyone attach a debugger, read memory and run code in the app's context.
+    fix: Remove android:debuggable; let the build type set it (debug only).
+    examples:
+      file: android/app/src/main/AndroidManifest.xml
+      bad: ['    <application android:debuggable="true" android:label="app">']
+      good: ['    <application android:label="app">']
+
+  - id: android-cleartext-traffic
+    title: Android cleartext traffic permitted
+    languages: [xml]
+    pattern: 'android:usesCleartextTraffic\s*=\s*"true"|cleartextTrafficPermitted\s*=\s*"true"'
+    severity: medium
+    confidence: high
+    owasp: A04
+    cwe: CWE-319
+    message: The app may send traffic over plain HTTP.
+    fix: Remove it; if a dev server needs HTTP, scope it to that domain in a debug-only network_security_config.
+    examples:
+      file: android/app/src/main/AndroidManifest.xml
+      bad: ['<application android:usesCleartextTraffic="true">', '<base-config cleartextTrafficPermitted="true">']
+      good: ['<application android:usesCleartextTraffic="false">']
+
+  - id: android-allow-backup
+    title: Android backups enabled
+    languages: [xml]
+    pattern: 'android:allowBackup\s*=\s*"true"'
+    paths: {include: ["*AndroidManifest.xml"]}
+    severity: low
+    confidence: medium
+    owasp: A04
+    cwe: CWE-530
+    message: App data (SharedPreferences, databases) can be extracted through device/cloud backups.
+    fix: Set allowBackup="false", or define dataExtractionRules/fullBackupContent excluding sensitive files.
+    examples:
+      file: android/app/src/main/AndroidManifest.xml
+      bad: ['<application android:allowBackup="true">']
+      good: ['<application android:allowBackup="false">']
+
+  - id: android-exported-component
+    title: Exported Android component
+    type: gate
+    languages: [xml]
+    pattern: '<(?:activity|service|receiver|provider)\b[^>]*android:exported\s*=\s*"true"'
+    paths: {include: ["*AndroidManifest.xml"]}
+    multiline: true
+    owasp: A01
+    cwe: CWE-926
+    question: Other apps can start/bind/query this component. Is it the launcher/deep-link entry only, and are intents it receives validated? Providers/services exported without android:permission are a common data-leak path.
+    examples:
+      file: android/app/src/main/AndroidManifest.xml
+      bad: ['<receiver android:name=".PushReceiver" android:exported="true">']
+
+  # ------------------------------------------------------------------ iOS configuration
+  - id: ios-arbitrary-loads
+    title: iOS App Transport Security disabled
+    languages: [xml]
+    pattern: '<key>\s*NSAllowsArbitraryLoads(?:InWebContent|ForMedia)?\s*</key>\s*<true\s*/>|<key>\s*NSExceptionAllowsInsecureHTTPLoads\s*</key>\s*<true\s*/>'
+    multiline: true
+    severity: medium
+    confidence: high
+    owasp: A04
+    cwe: CWE-319
+    message: ATS is relaxed, allowing plain HTTP (and weaker TLS) connections.
+    fix: Remove NSAllowsArbitraryLoads; add narrowly scoped NSExceptionDomains only where unavoidable.
+    examples:
+      file: ios/Runner/Info.plist
+      bad: ["<key>NSAppTransportSecurity</key>\n<dict>\n  <key>NSAllowsArbitraryLoads</key>\n  <true/>\n</dict>"]
+      good: ["<key>NSAllowsArbitraryLoads</key>\n<false/>"]

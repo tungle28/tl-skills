@@ -1,0 +1,160 @@
+# Nuxt 3/4 (Nitro + h3 server routes) and Vue SFCs. .vue files are scanned as "javascript".
+# Server routes live in server/api/**, server/routes/**, server/middleware/**.
+rules:
+  # ------------------------------------------------------------------ access control (A01) — gates
+  - id: nuxt-server-route-no-session
+    title: Nuxt server route with no session/auth reference
+    type: gate
+    languages: [js]
+    paths: {include: ["server/api/*", "*/server/api/*", "server/routes/*", "*/server/routes/*"]}
+    pattern: 'export\s+default\s+define(?:Cached)?EventHandler\s*\('
+    file_excludes: 'requireUserSession|getUserSession|getServerSession|requireAuth|useAuth\w*\(|event\.context\.(?:user|auth|session|currentUser)|verify(?:Token|Jwt|Session)|getToken\s*\(|backendFetch|authenticate\w*\('
+    owasp: A01
+    cwe: CWE-306
+    question: Is this route meant to be public? If not, is it guarded by server/middleware (runs before every route and is invisible here) or a shared helper not recognized by this rule? If public, what does it expose to anonymous callers and is it rate-limited?
+    guidance: Check server/middleware/*, nitro plugins, and shared utils in server/utils/ before concluding it is unguarded.
+    examples:
+      file: server/api/orders/[id].get.ts
+      bad: ["export default defineEventHandler(async (event) => {\n  const id = getRouterParam(event, 'id')\n  return db.order.findUnique({ where: { id } })\n})"]
+      good: ["export default defineEventHandler(async (event) => {\n  const { user } = await requireUserSession(event)\n})"]
+
+  - id: nuxt-server-id-param
+    title: Nuxt server route reads an object id from the request
+    type: gate
+    languages: [js]
+    pattern: '\bgetRouterParam\s*\(\s*event\s*,\s*[''"`]\w*(?:[iI]d|Code|No)[''"`]|\bgetRouterParams\s*\(\s*event\s*\)|\bevent\.context\.params\s*(?:\?\.|\.)\s*\w*(?:[iI]d|Code)\b|\bgetQuery\s*\(\s*event\s*\)\s*\.\s*\w*(?:[iI]d)\b'
+    file_requires: 'define(?:Cached)?EventHandler'
+    owasp: A01
+    cwe: CWE-639
+    question: Is the id compared to the session's own identity/tenant, or constrained in the query? If the route forwards to a backend, does that backend enforce ownership — or does it trust the frontend? requireUserSession proves authentication, not that this row belongs to the caller.
+    examples:
+      bad: ["export default defineEventHandler(async (event) => {\n  const id = getRouterParam(event, 'id')", "export default defineEventHandler((e) => { const id = event.context.params.orderId })"]
+      good: ["export default defineEventHandler(async (event) => {\n  const page = getRouterParam(event, 'page')"]
+
+  - id: nuxt-client-route-middleware
+    title: Client-side route middleware used as access control
+    type: gate
+    languages: [js]
+    pattern: '\bdefineNuxtRouteMiddleware\s*\('
+    owasp: A01
+    cwe: CWE-602
+    question: Route middleware in middleware/ runs in the browser (and SSR) and only hides pages. Is every server route and backend API behind these pages enforcing the same check server-side?
+    examples:
+      bad: ["export default defineNuxtRouteMiddleware((to) => {\n  if (!user.value?.isAdmin) return navigateTo('/')\n})"]
+
+  - id: nuxt-body-mass-assignment
+    title: Request body passed straight into a database write
+    type: gate
+    languages: [js]
+    pattern: '\.(?:create|update|upsert|insert|updateMany|createMany)\s*\(\s*\{\s*(?:where\s*:[^}]*\}\s*,\s*)?data\s*:\s*(?:body|await\s+readBody\s*\(\s*event\s*\))\s*[,}]|\.(?:create|insert|update)\s*\(\s*(?:body|await\s+readBody\s*\(\s*event\s*\))\s*\)'
+    owasp: A01
+    cwe: CWE-915
+    question: Can the caller set fields they should not (role, isAdmin, ownerId, tenantId, balance, status)? Is the body validated against a schema that whitelists fields (readValidatedBody + zod .strict/pick)?
+    examples:
+      bad: ["const body = await readBody(event)\nreturn prisma.user.update({ where: { id }, data: body })", "await db.insert(await readBody(event))"]
+      good: ["const body = await readValidatedBody(event, schema.parse)\nreturn prisma.user.update({ where: { id }, data: { name: body.name } })"]
+
+  - id: nuxt-ssrf-fetch
+    title: Server-side fetch/proxy to a request-influenced URL
+    type: gate
+    languages: [js]
+    pattern: '\b(?:\$fetch|ofetch|fetch|proxyRequest|sendProxy)\s*\(\s*(?:event\s*,\s*)?(?:query\.|body\.|getQuery\s*\(|url\b|target\b|`[^`]*\$\{\s*(?:query|body|url|target|params))'
+    file_requires: 'define(?:Cached)?EventHandler|defineNitroPlugin'
+    owasp: A01
+    cwe: CWE-918
+    question: Can the caller choose the host (not just a path segment on a fixed base URL)? If so, is there a host allow-list and a block on internal/metadata addresses?
+    examples:
+      bad: ["export default defineEventHandler(async (event) => {\n  const { url } = getQuery(event)\n  return $fetch(url)"]
+      good: ["export default defineEventHandler(async (event) => {\n  return $fetch('/v1/items', { baseURL: config.apiBase })"]
+
+  # ------------------------------------------------------------------ data exposure / config
+  - id: nuxt-runtime-public-secret
+    title: Secret-like key in runtimeConfig.public
+    languages: [js]
+    paths: {include: ["nuxt.config.*", "*/nuxt.config.*", "app.config.*", "*/app.config.*"]}
+    pattern: '\bpublic\s*:\s*\{[^}]*?\b(\w*(?:[sS]ecret|[pP]assword|[pP]rivate[kK]ey|[aA]pi[sS]ecret|[sS]erviceRole|[aA]dminToken|[sS]erverKey)\w*)\s*:'
+    multiline: true
+    severity: high
+    confidence: medium
+    owasp: A04
+    cwe: CWE-200
+    message: Everything under runtimeConfig.public (and app.config) is serialized into the page payload and visible to every visitor.
+    fix: Move the value to private runtimeConfig (top level, server-only), use it from server routes, and rotate it if it was deployed.
+    examples:
+      file: nuxt.config.ts
+      bad: ["runtimeConfig: {\n  public: {\n    apiBase: '',\n    stripeSecret: '',\n  }\n}"]
+      good: ["runtimeConfig: {\n  stripeSecret: '',\n  public: {\n    apiBase: '',\n  }\n}"]
+
+  - id: nuxt-private-config-in-client
+    title: Private runtime config referenced from client code
+    type: gate
+    languages: [js]
+    paths: {exclude: ["server/*", "*/server/*", "nuxt.config.*", "*/nuxt.config.*"]}
+    pattern: '\buseRuntimeConfig\s*\(\s*\)\s*\.(?!public\b|app\b)\w+'
+    owasp: A04
+    cwe: CWE-200
+    question: This reads a non-public runtimeConfig key outside server/. On the client it is undefined, but during SSR the value can end up in rendered HTML or the payload — is it a secret, and could it be serialized into state (useState/useAsyncData)?
+    examples:
+      file: composables/useApi.ts
+      bad: ['const key = useRuntimeConfig().stripeSecret']
+      good: ['const base = useRuntimeConfig().public.apiBase']
+
+  - id: vue-v-html
+    title: v-html renders unescaped HTML
+    languages: [js]
+    pattern: '\bv-html\s*=\s*"(?![^"]*(?:DOMPurify|sanitize|\$sanitize|purify))[^"]+"'
+    severity: medium
+    confidence: medium
+    owasp: A05
+    cwe: CWE-79
+    message: v-html bypasses Vue's escaping; user-influenced content becomes XSS (in SSR it is also rendered server-side into the page).
+    fix: Render as text, or sanitize with DOMPurify / isomorphic-dompurify right before binding.
+    examples:
+      file: components/Comment.vue
+      bad: ['<div v-html="comment.body"></div>']
+      good: ['<div v-html="sanitize(comment.body)"></div>', '<div>{{ comment.body }}</div>']
+
+  - id: nuxt-sourcemap-client
+    title: Client source maps enabled for production
+    languages: [js]
+    paths: {include: ["nuxt.config.*", "*/nuxt.config.*"]}
+    pattern: '\bsourcemap\s*:\s*(?:true\b|\{[^}]*\bclient\s*:\s*true\b)'
+    severity: low
+    confidence: medium
+    owasp: A02
+    cwe: CWE-540
+    message: Public source maps hand out readable source, including comments and internal endpoints.
+    fix: Disable client sourcemaps in production or use 'hidden' and upload them to your error tracker only.
+    examples:
+      file: nuxt.config.ts
+      bad: ['  sourcemap: { client: true },', '  sourcemap: true,']
+      good: ['  sourcemap: { client: false, server: true },']
+
+  - id: nuxt-cors-wildcard
+    title: Nitro route rules allow any origin with credentials
+    languages: [js]
+    pattern: '(?:[''"]?Access-Control-Allow-Origin[''"]?\s*:\s*[''"]\*[''"]|origin\s*:\s*[''"]\*[''"])'
+    file_requires: '(?i)credentials[''"]?\s*:\s*(?:true|[''"]true[''"])|Allow-Credentials'
+    severity: high
+    confidence: medium
+    owasp: A02
+    cwe: CWE-942
+    message: A wildcard origin combined with credentials exposes authenticated responses cross-origin (browsers reject the literal combination, so implementations often reflect the Origin instead — check handleCors/appendCorsHeaders options).
+    fix: Use an explicit origin list in routeRules/handleCors.
+    examples:
+      bad: ["routeRules: { '/api/**': { cors: true, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Credentials': 'true' } } }"]
+      good: ["headers: { 'Access-Control-Allow-Origin': 'https://app.example.com', 'Access-Control-Allow-Credentials': 'true' }"]
+
+  - id: nuxt-error-leak
+    title: Internal error details returned from a server route
+    languages: [js]
+    pattern: '\bcreateError\s*\(\s*\{[^}]*\b(?:message|statusMessage|data)\s*:\s*(?:err|error|e)\s*(?:\.(?:message|stack)|\s*[,}])'
+    severity: low
+    confidence: medium
+    owasp: A10
+    cwe: CWE-209
+    message: Raw exception text/stack sent to the client can disclose queries, paths or internal hosts.
+    fix: Log the error server-side; return a generic statusMessage.
+    examples:
+      bad: ['throw createError({ statusCode: 500, message: err.message })', 'throw createError({ statusCode: 500, data: error })']
+      good: ['throw createError({ statusCode: 500, statusMessage: "Internal error" })']

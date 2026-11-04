@@ -1,0 +1,90 @@
+# Runaway loops and uncontrolled cost / quota exhaustion (reviewed with checks/runaway-cost.md).
+# Mostly gates: whether a retry is bounded or a job can overlap depends on code around the site.
+rules:
+  - id: cost-retry-forever
+    title: Unbounded retry policy
+    languages: [csharp, js, python]
+    pattern: '\b(?:RetryForever|WaitAndRetryForever|RetryForeverAsync|WaitAndRetryForeverAsync)\b|\bretries\s*:\s*(?:Infinity|-1)\b|\bretry\s*=\s*Retry\(\s*total\s*=\s*None'
+    severity: medium
+    confidence: high
+    owasp: A06
+    cwe: CWE-834
+    message: A retry with no attempt cap can hammer a dependency indefinitely and, on pay-per-call services, run up cost with no ceiling.
+    fix: Cap attempts, use exponential backoff with jitter, and add a circuit breaker; alert when the cap is hit.
+    examples:
+      bad: ['Policy.Handle<HttpRequestException>().WaitAndRetryForeverAsync(i => TimeSpan.FromSeconds(1))']
+      good: ['Policy.Handle<HttpRequestException>().WaitAndRetryAsync(5, i => TimeSpan.FromSeconds(Math.Pow(2, i)))']
+
+  - id: cost-retry-loop
+    title: Hand-written retry loop around an outbound call
+    type: gate
+    languages: [csharp, js, python]
+    pattern: '\bwhile\s*\(\s*(?:true|!\s*\w*(?i:ok|success|succeeded|delivered|sent|done|result|response)\w*)\s*\)|\bwhile\s+(?:True|not\s+\w*(?i:ok|success|succeeded|delivered|sent|done)\w*)\s*:|\bfor\s*\(\s*;\s*;\s*\)'
+    pattern_not: '^\s*(?://|#|\*)'
+    file_requires: '(?i)\bfetch\(|axios|https?\.request|\brequests\.|httpx|HttpClient|\.send\w*\(|\.publish\w*\(|openai|anthropic'
+    owasp: A06
+    cwe: CWE-834
+    question: Does this loop stop after a bounded number of attempts, with backoff, when the dependency keeps failing (outage, invalid recipient, revoked key)? What does each iteration cost on a paid or quota-limited API, and how many of these loops can run at once?
+    guidance: Read the loop body and its exit condition together; see checks/runaway-cost.md.
+    examples:
+      bad: ['while (!delivered) { delivered = (await fetch(url)).ok; }', 'while not sent: sent = requests.post(url).ok', 'for (;;) { await axios.post(url, body); }']
+      good: ['while (attempt < 5 && !delivered) { delivered = (await fetch(url)).ok; }', 'while (queue.length > 0) { await fetch(queue.pop()); }']
+
+  - id: cost-scheduled-job
+    title: Scheduled / recurring job
+    type: gate
+    languages: [csharp, js, python]
+    pattern: '@Cron\s*\(|@Interval\s*\(|\bRecurringJob\.AddOrUpdate\b|\bcron\.schedule\s*\(|\bnew\s+CronJob\s*\(|\bschedule\.every\b|@(?:app\.)?(?:periodic_task|scheduled_job)\b|\bsetInterval\s*\(|\bBackgroundService\b|\bIHostedService\b|\bPeriodicTimer\b'
+    owasp: A06
+    cwe: CWE-400
+    question: Can one run overlap the next (no distributed lock / DisableConcurrentExecution / idempotency guard)? What happens if a run is slower than the interval, or runs on every replica at once?
+    examples:
+      bad: ['RecurringJob.AddOrUpdate("sync", () => Sync(), Cron.Minutely);', '@Cron("*/1 * * * *")']
+
+  - id: cost-requeue-on-failure
+    title: Message re-queued on failure
+    type: gate
+    languages: [csharp, js, python]
+    pattern: '\b(?:BasicNack|basic_nack|nack|BasicReject|basic_reject|reject)\s*\([^)]*(?:requeue\s*[:=]\s*true|,\s*true\s*\))|\brequeue\s*[:=]\s*[Tt]rue'
+    owasp: A06
+    cwe: CWE-834
+    question: Is there a total retry budget (delivery count / x-death / dead-letter queue)? Re-queuing a poison message without a cap loops forever.
+    examples:
+      bad: ['channel.BasicNack(ea.DeliveryTag, false, true);', 'channel.nack(msg, false, true)']
+
+  - id: cost-self-publish
+    title: Handler may publish the event type it consumes
+    type: gate
+    languages: [csharp, js, python]
+    pattern: '\b(?:Publish|PublishAsync|Send|SendAsync|emit|publish|produce|enqueue|Enqueue)\s*\(\s*(?:new\s+)?\w*(?:Event|Message|Command|Job)\b'
+    file_requires: '(?i)\b(?:IConsumer<|IHandleMessages<|INotificationHandler<|IRequestHandler<|@EventPattern|@MessagePattern|@OnEvent|@Process|@RabbitSubscribe|@KafkaListener|consume\s*\(|subscribe\s*\()'
+    owasp: A06
+    cwe: CWE-834
+    question: Can this handler (directly or through another service) emit the same message type it handles, or trigger a webhook that calls back into it? If so, what stops the loop (depth counter, idempotency key, max fan-out)?
+    examples:
+      bad: ['await _bus.Publish(new OrderUpdatedEvent(id)); // inside IConsumer<OrderUpdatedEvent>']
+
+  - id: cost-unbounded-fanout
+    title: Fan-out over a collection with outbound calls
+    type: gate
+    languages: [js, csharp, python]
+    pattern: '\bPromise\.all\s*\(\s*\w+\.map\s*\(|\bTask\.WhenAll\s*\(\s*\w+\.Select\s*\(|\basyncio\.gather\s*\(\s*\*'
+    owasp: A06
+    cwe: CWE-770
+    question: Is the collection size bounded by something the caller cannot control? Unbounded fan-out multiplies calls to paid or rate-limited services and can exhaust connections.
+    examples:
+      bad: ['await Promise.all(items.map(i => callApi(i)))', 'await Task.WhenAll(ids.Select(id => client.GetAsync(id)));']
+
+  - id: fin-money-operation
+    title: Money-moving or balance-changing operation
+    type: gate
+    languages: [csharp, js, python, java, go]
+    pattern: '(?:\bdef\s+|\bfunction\s+|\b(?:public|private|protected|internal)\s+[\w<>\[\],?\s]*?|\basync\s+)(?i:transfer|withdraw|deposit|payout|refund|debit|credit|charge|redeem|disburse|settle)\w*\s*\(|\b\w*(?i:transfer|withdraw|deposit|payout|refund|payment|wallet)\w*(?:Router|router)\.(?:post|put|patch|delete)\s*\(|\b(?:app|router)\.(?:post|put|patch|delete)\s*\(\s*[''"`][^''"`]*(?i:transfer|withdraw|deposit|payout|refund|payment)'
+    pattern_not: '^\s*(?://|#|\*)'
+    owasp: A06
+    cwe: CWE-362
+    question: Is this operation authorized for the caller's own account, idempotent (idempotency key / unique constraint), and safe under concurrent requests (row lock, concurrency token or atomic conditional UPDATE)? Are amount sign, precision (decimal) and limits validated server-side, and is an audit record written?
+    guidance: Read the handler, the service and the SQL/ORM call together; compare with sibling money operations. See checks/business-logic.md.
+    examples:
+      bad: ['    public async Task<IActionResult> Transfer(Guid accountId, decimal amount, Guid to)', 'async function withdrawFunds(req, res) {', 'def refund_order(order_id, amount):', "transfersRouter.post('/', async (req, res) => {", "router.post('/refunds/:transactionId', handler)"]
+      good: ['// Transfer(a, b) docs', 'var t = new Transfer(a, b);']

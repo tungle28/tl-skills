@@ -1,0 +1,6 @@
+interface:
+  display_name: "Security Audit"
+  short_description: "Evidence-backed security audit mapped to OWASP Top 10:2025"
+  default_prompt: "Use $tl-security-audit to audit this codebase for security vulnerabilities and produce an evidence-backed report."
+policy:
+  allow_implicit_invocation: true

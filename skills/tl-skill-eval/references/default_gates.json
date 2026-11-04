@@ -1,0 +1,16 @@
+{
+  "_note": "Starting-point thresholds, not standards. Tune per skill: security skills weight recall; content skills weight precision.",
+  "gates": [
+    {"metric": "lint.errors", "op": "<=", "fail": 0},
+    {"metric": "trigger.recall", "op": ">=", "fail": 0.7, "warn": 0.85},
+    {"metric": "trigger.precision", "op": ">=", "fail": 0.7, "warn": 0.85},
+    {"metric": "trigger.near_miss_fp_rate", "op": "<=", "fail": 0.4, "warn": 0.2},
+    {"metric": "quality.pass_rate_delta", "op": ">=", "fail": 0.0, "warn": 0.15},
+    {"metric": "quality.with_skill_pass_rate", "op": ">=", "fail": 0.6, "warn": 0.8},
+    {"metric": "harness.must_find_recall", "op": ">=", "fail": 0.8, "warn": 1.0},
+    {"metric": "harness.seeded_recall", "op": ">=", "fail": 0.5, "warn": 0.7},
+    {"metric": "harness.precision", "op": ">=", "fail": 0.6, "warn": 0.8},
+    {"metric": "harness.reproducibility_jaccard", "op": ">=", "fail": 0.4, "warn": 0.6},
+    {"metric": "harness.severity_kappa", "op": ">=", "fail": 0.2, "warn": 0.4}
+  ]
+}

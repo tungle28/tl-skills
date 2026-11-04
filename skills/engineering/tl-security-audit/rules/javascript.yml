@@ -1,0 +1,302 @@
+# JavaScript / TypeScript: Node, Express, NestJS, Prisma/TypeORM, React/Next.
+rules:
+  # ------------------------------------------------------------------ injection (A05)
+  - id: js-eval
+    title: eval / new Function / string timers
+    languages: [js]
+    pattern: '(?<![\w.])(?:eval\s*\(|new\s+Function\s*\(|set(?:Timeout|Interval)\s*\(\s*[''"`])'
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-95
+    message: Evaluating strings as code turns any attacker influence over the string into code execution.
+    fix: Remove dynamic evaluation; use JSON.parse for data, a lookup table for dispatch, or a sandboxed expression parser.
+    examples:
+      bad: ['const r = eval(req.query.expr);', 'const fn = new Function("a", body);']
+      good: ['const data = JSON.parse(text);', 'setTimeout(() => run(), 100);']
+
+  - id: js-child-process-dynamic
+    title: Shell command built from a non-constant string
+    languages: [js]
+    pattern: '\b(?:exec|execSync|spawn|spawnSync|execFile)\s*\(\s*(?:`[^`]*\$\{|[''"][^''"]*[''"]\s*\+|[a-zA-Z_]\w*\s*[,)])'
+    file_requires: 'child_process|execa|shelljs'
+    pattern_not: '\b(?:regex|re|pattern)\.exec\('
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-78
+    message: exec/execSync run through a shell; interpolated input enables command injection.
+    fix: Use execFile/spawn with an argument array and shell:false; validate arguments against an allow-list.
+    examples:
+      bad: ["const { exec } = require('child_process');\nexec(`convert ${file} out.png`);", "import { execSync } from 'child_process';\nexecSync(\"ping \" + host);"]
+      good: ["const { execFile } = require('child_process');\nexecFile(\"convert\", [file, \"out.png\"]);"]
+
+  - id: js-sql-template
+    title: SQL built with template literal or concatenation
+    languages: [js]
+    pattern: '\.(?:query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe|unsafe)\s*\(\s*(?:`[^`]*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)\b[^`]*\$\{|[''"][^''"]*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b[^''"]*[''"]\s*\+)'
+    ignore_case: true
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-89
+    message: Interpolated values become part of the SQL text. (Prisma $queryRaw tagged templates are safe; $queryRawUnsafe and .query(`...${}`) are not.)
+    fix: Use parameter placeholders ($1 / ?) with a values array, the ORM query builder, or Prisma's tagged $queryRaw.
+    examples:
+      bad: ['await pool.query(`SELECT * FROM users WHERE id = ${id}`);', 'prisma.$queryRawUnsafe(`SELECT * FROM t WHERE a = ${a}`)', 'db.query("SELECT * FROM t WHERE id = " + id)']
+      good: ['await pool.query("SELECT * FROM users WHERE id = $1", [id]);', 'prisma.$queryRaw`SELECT * FROM t WHERE a = ${a}`']
+
+  - id: js-nosql-where
+    title: MongoDB $where / operator injection risk
+    languages: [js]
+    pattern: '\$where\s*:|\.find(?:One)?\s*\(\s*req\.(?:body|query)\b'
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-943
+    message: '$where executes JavaScript; passing req.body/req.query objects straight into a filter allows operator injection ({"$ne": null}).'
+    fix: Build filters from explicitly typed fields (cast to string/number), enable mongoose strictQuery / sanitizeFilter, never use $where with input.
+    examples:
+      bad: ['User.findOne(req.body)', 'col.find({ $where: "this.a == " + a })']
+      good: ['User.findOne({ email: String(req.body.email) })']
+
+  - id: js-dangerously-set-html
+    title: React dangerouslySetInnerHTML / DOM innerHTML sink
+    languages: [js]
+    pattern: 'dangerouslySetInnerHTML\s*=\s*\{\{\s*__html\s*:(?!\s*[''"`][^''"`$]*[''"`]\s*\}\})|\.(?:innerHTML|outerHTML)\s*=(?!=)(?!\s*[''"`][^''"`$]*[''"`]\s*;)|\bdocument\.write\s*\('
+    severity: medium
+    confidence: medium
+    owasp: A05
+    cwe: CWE-79
+    message: HTML inserted without sanitization executes any script/handlers it contains.
+    fix: Render as text; if HTML is required, sanitize with DOMPurify (allow-list) right before insertion.
+    examples:
+      bad: ['<div dangerouslySetInnerHTML={{ __html: post.body }} />', 'el.innerHTML = msg;']
+      good: ['<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(post.body) }} />', 'el.innerHTML = "";']
+    pattern_not: 'DOMPurify\.sanitize|sanitizeHtml\('
+
+  # ------------------------------------------------------------------ crypto / auth (A04, A07)
+  - id: js-weak-hash
+    title: MD5 / SHA1 hashing
+    languages: [js]
+    pattern: 'createHash\s*\(\s*[''"](?:md5|sha1)[''"]'
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-328
+    message: MD5/SHA1 are unsuitable for passwords and signatures.
+    fix: Passwords → argon2/bcrypt/scrypt; integrity → sha256+; HMAC for message authentication.
+    examples:
+      bad: ['crypto.createHash("md5").update(pw)']
+      good: ['crypto.createHash("sha256")']
+
+  - id: js-insecure-random
+    title: Math.random used for a security value
+    languages: [js]
+    pattern: 'Math\.random\s*\(\s*\)'
+    file_requires: '(?i)(token|otp|password|secret|salt|nonce|reset|invite|apikey|session)'
+    severity: medium
+    confidence: low
+    owasp: A04
+    cwe: CWE-338
+    message: Math.random is not cryptographically secure; generated tokens are guessable.
+    fix: Use crypto.randomBytes / crypto.randomUUID / crypto.getRandomValues.
+    examples:
+      bad: ['const token = Math.random().toString(36).slice(2); // reset']
+      good: ['const token = crypto.randomBytes(32).toString("hex"); // reset']
+
+  - id: js-tls-reject-unauthorized
+    title: TLS verification disabled
+    languages: [js, env, yaml, json]
+    pattern: 'rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*[=:]\s*[''"]?0'
+    severity: high
+    confidence: high
+    owasp: A04
+    cwe: CWE-295
+    message: Certificate verification is off; connections can be intercepted.
+    fix: Remove it; for private CAs pass `ca` with the CA certificate.
+    examples:
+      bad: ['https.request({ rejectUnauthorized: false })', 'NODE_TLS_REJECT_UNAUTHORIZED=0']
+      good: ['https.request({ ca: fs.readFileSync("ca.pem") })']
+
+  - id: js-jwt-decode-for-auth
+    title: jwt.decode used where verification may be needed
+    type: gate
+    languages: [js]
+    pattern: '\bjwt\.decode\s*\(|\bjwtDecode\s*\(|\bdecodeJwt\s*\('
+    owasp: A07
+    cwe: CWE-347
+    question: Is the decoded payload used for any authorization or identity decision on the server? decode() does not verify the signature — only verify() does.
+    examples:
+      bad: ['const user = jwt.decode(token);']
+
+  - id: js-jwt-alg-none
+    title: JWT verification allows 'none' or skips algorithm pinning
+    languages: [js]
+    pattern: 'algorithms\s*:\s*\[[^\]]*[''"]none[''"]|ignoreExpiration\s*:\s*true'
+    severity: high
+    confidence: high
+    owasp: A07
+    cwe: CWE-347
+    message: Accepting alg "none" or ignoring expiration lets forged or expired tokens authenticate.
+    fix: 'Pin algorithms: [''RS256''] (or your algorithm) and keep expiration checks.'
+    examples:
+      bad: ['jwt.verify(t, key, { algorithms: ["HS256", "none"] })', 'jwt.verify(t, key, { ignoreExpiration: true })']
+      good: ['jwt.verify(t, key, { algorithms: ["RS256"] })']
+
+  - id: js-token-in-localstorage
+    title: Auth token stored in localStorage
+    languages: [js]
+    pattern: '(?:localStorage|sessionStorage)\.setItem\s*\(\s*[''"`][^''"`]*(?:token|jwt|auth|session)[^''"`]*[''"`]'
+    ignore_case: true
+    severity: low
+    confidence: medium
+    owasp: A07
+    cwe: CWE-922
+    message: Tokens in web storage are readable by any script on the origin, so one XSS exfiltrates sessions.
+    fix: Prefer HttpOnly+Secure+SameSite cookies (BFF pattern); if tokens must live in JS, keep them short-lived and in memory.
+    examples:
+      bad: ['localStorage.setItem("access_token", t)']
+      good: ['localStorage.setItem("theme", "dark")']
+
+  - id: js-cookie-flags
+    title: Cookie set without httpOnly/secure
+    languages: [js]
+    pattern: '\b(?:httpOnly|secure)\s*:\s*false'
+    file_requires: '(?i)cookie|session'
+    severity: medium
+    confidence: medium
+    owasp: A07
+    cwe: CWE-614
+    message: Session cookies must be HttpOnly and Secure.
+    fix: 'Set httpOnly: true, secure: true (behind TLS), sameSite: ''lax'' or ''strict''.'
+    examples:
+      bad: ['res.cookie("sid", id, { httpOnly: false })']
+      good: ['res.cookie("sid", id, { httpOnly: true, secure: true, sameSite: "lax" })']
+
+  # ------------------------------------------------------------------ access control / SSRF (A01) — gates
+  - id: js-nest-param-id
+    title: NestJS handler takes an id parameter
+    type: gate
+    languages: [typescript, javascript]
+    pattern: '@Param\s*\(\s*[''"](?:\w*[iI]d|\w*Code|\w*No)[''"]'
+    owasp: A01
+    cwe: CWE-639
+    question: Does anything tie this id to the caller (guard, service-level ownership filter, tenant-scoped repository)? An AuthGuard alone proves authentication, not ownership.
+    examples:
+      bad: ['async findOne(@Param("id") id: string) {']
+
+  - id: js-nest-public
+    title: NestJS route marked public
+    type: gate
+    languages: [typescript, javascript]
+    pattern: '@(?:Public|SkipAuth|AllowAnonymous|SkipThrottle)\s*\('
+    owasp: A01
+    cwe: CWE-306
+    question: Is this route meant to be public / unthrottled? What can an anonymous caller read or trigger, and is it rate-limited?
+    examples:
+      bad: ['@Public()']
+
+  - id: js-express-id-route
+    title: Express/Fastify route with an id path parameter
+    type: gate
+    languages: [js]
+    pattern: '\b(?:app|router|\w+Router|fastify|server)\.(?:get|put|patch|delete|post)\s*\(\s*[''"`][^''"`]*/:\w*(?:[iI]d|Code)\b'
+    owasp: A01
+    cwe: CWE-639
+    question: Where is it checked that req.params id belongs to the authenticated caller (or their tenant)? Check route-level middleware and the data-access call.
+    examples:
+      bad: ['router.get("/accounts/:accountId", handler)', "accountsRouter.get('/:id/transactions', async (req, res) => {"]
+      good: ['routerConfig.get("/accounts/:accountId")', 'app.get("/health", handler)']
+
+  - id: js-ssrf-request-url
+    title: Outbound request to a caller-influenced URL
+    type: gate
+    languages: [js]
+    pattern: '\b(?:axios(?:\.(?:get|post|put|request))?|fetch|got|request|needle|http\.get|https\.get)\s*\(\s*(?:req\.|request\.|body\.|query\.|params\.|`[^`]*\$\{\s*(?:req|body|query|params|url|target|callback|webhook))'
+    owasp: A01
+    cwe: CWE-918
+    question: Can the caller control the host (not just a path/query value)? If so, is there an allow-list of hosts, and are internal/metadata addresses (169.254.169.254, localhost, private ranges) blocked after DNS resolution?
+    examples:
+      bad: ['const r = await axios.get(req.body.url);', 'await fetch(`${webhookUrl}/notify`)']
+
+  - id: js-open-redirect
+    title: Redirect to a request-controlled URL
+    type: gate
+    languages: [js]
+    pattern: '\bres\.redirect\s*\(\s*(?:\d+\s*,\s*)?req\.(?:query|body|params)\.|\bredirect\s*\(\s*(?:searchParams\.get|query\.)'
+    owasp: A01
+    cwe: CWE-601
+    question: Is the destination restricted to relative paths or an allow-list of hosts?
+    examples:
+      bad: ['res.redirect(req.query.next)']
+
+  - id: js-path-traversal
+    title: File served or read from a request-derived path
+    type: gate
+    languages: [js]
+    pattern: '\b(?:res\.sendFile|res\.download|fs\.(?:readFile|createReadStream|readFileSync|unlink|writeFile)\w*)\s*\([^)]*req\.(?:params|query|body)'
+    owasp: A01
+    cwe: CWE-22
+    question: Is the input reduced to a basename and the resolved path checked to stay inside the allowed root (path.resolve + startsWith(root + sep))?
+    examples:
+      bad: ['res.sendFile(path.join(dir, req.params.name))']
+
+  # ------------------------------------------------------------------ misconfiguration (A02)
+  - id: js-cors-reflect-credentials
+    title: CORS allows any origin with credentials
+    languages: [js]
+    pattern: 'origin\s*:\s*(?:true|[''"]\*[''"]|\(\s*(\w*)\s*,\s*(?:cb|callback)\s*\)\s*=>\s*(?:cb|callback)\s*\(\s*null\s*,\s*(?:true|\1(?:\s*(?:\|\||\?\?)\s*true)?)\s*\))'
+    file_requires: 'credentials\s*:\s*true'
+    severity: high
+    confidence: medium
+    owasp: A02
+    cwe: CWE-942
+    message: Reflecting any origin while allowing credentials lets any site perform authenticated cross-origin reads.
+    fix: Use an explicit origin allow-list from configuration.
+    examples:
+      bad: ['app.enableCors({ origin: true, credentials: true })', 'app.use(cors({ origin: (origin, cb) => cb(null, origin || true), credentials: true }));']
+      good: ['app.enableCors({ origin: ["https://app.example.com"], credentials: true })']
+
+  - id: js-graphql-introspection
+    title: GraphQL introspection / playground enabled explicitly
+    languages: [js]
+    pattern: '\b(?:introspection|playground|graphiql)\s*:\s*true'
+    severity: low
+    confidence: medium
+    owasp: A02
+    cwe: CWE-200
+    message: Introspection in production publishes the full schema, including admin-only operations.
+    fix: 'Enable only outside production (introspection: process.env.NODE_ENV !== "production").'
+    examples:
+      bad: ['GraphQLModule.forRoot({ playground: true, introspection: true })']
+      good: ['introspection: process.env.NODE_ENV !== "production"']
+
+  - id: js-error-stack-to-client
+    title: Error details sent to the client
+    languages: [js]
+    pattern: '\bres\.(?:status\(\d+\)\.)?(?:send|json)\s*\([^)]*\b(?:err|error|e)\.(?:stack|message)\b'
+    severity: low
+    confidence: medium
+    owasp: A10
+    cwe: CWE-209
+    message: Stack traces and raw error messages disclose internals.
+    fix: Log server-side with a correlation id; return a generic message.
+    examples:
+      bad: ['res.status(500).json({ error: err.stack })']
+      good: ['res.status(500).json({ error: "internal", traceId })']
+
+  - id: js-next-public-secret
+    title: Secret-named variable exposed to the browser bundle
+    languages: [js, env]
+    pattern: '\b(?:NEXT_PUBLIC|VITE|REACT_APP|NUXT_PUBLIC|EXPO_PUBLIC)_\w*(?:SECRET|PRIVATE|PASSWORD|API_KEY|TOKEN)\w*'
+    ignore_case: true
+    severity: high
+    confidence: medium
+    owasp: A04
+    cwe: CWE-200
+    message: Variables with these prefixes are inlined into client JavaScript, visible to every visitor.
+    fix: Keep secrets server-side (API route / BFF) and expose only non-sensitive identifiers.
+    examples:
+      bad: ['NEXT_PUBLIC_STRIPE_SECRET_KEY=sk_test_x', 'const k = import.meta.env.VITE_OPENAI_API_KEY']
+      good: ['NEXT_PUBLIC_API_BASE_URL=https://api.example.com']

@@ -1,0 +1,621 @@
+# Taint spec — PHP: Laravel 5.x–11 (Request, facades, helpers), Symfony HttpFoundation, plain PHP superglobals.
+# Reserved metavariables: $SAFN $SAP $SARV $SATY $SARET $SABODY $SAE $SAO $SAX $SART
+# Every example must start with `<?php` — `taint.py test` writes it to a .php file as-is.
+# Sinks stay narrow and sanitizers stay sink-specific: HTML escaping, int casts and basename() are
+# not universal validation.
+language: php
+engine_languages: [php]
+inventory_languages: [php]
+example_ext: .php
+function_scopes:
+  - |
+    function $SAFN(..., $SAP, ...) { ... }
+  - |
+    public function $SAFN(..., $SAP, ...) { ... }
+  - |
+    protected function $SAFN(..., $SAP, ...) { ... }
+  - |
+    private function $SAFN(..., $SAP, ...) { ... }
+sources:
+  # Laravel/Symfony request methods, restricted to conventional request variable names
+  # (a generic `$x->input()` or `$repo->get()` is not request data).
+  - patterns:
+      - pattern-either:
+          - pattern: $REQ->input(...)
+          - pattern: $REQ->all()
+          - pattern: $REQ->get(...)
+          - pattern: $REQ->query(...)
+          - pattern: $REQ->route(...)
+          - pattern: $REQ->only(...)
+          - pattern: $REQ->except(...)
+          - pattern: $REQ->json(...)
+          - pattern: $REQ->post(...)
+          - pattern: $REQ->header(...)
+          - pattern: $REQ->cookie(...)
+          - pattern: $REQ->file(...)
+          - pattern: $REQ->validated(...)
+          - pattern: $REQ->string(...)
+          - pattern: $REQ->getContent(...)
+          - pattern: $REQ->toArray()
+          - pattern: $REQ->query->get(...)
+          - pattern: $REQ->query->all(...)
+          - pattern: $REQ->request->get(...)
+          - pattern: $REQ->request->all(...)
+          - pattern: $REQ->headers->get(...)
+          - pattern: $REQ->cookies->get(...)
+      - metavariable-regex: {metavariable: $REQ, regex: '^\$?(request|req)$'}
+  # Laravel magic properties: `$request->email` is the input (or route parameter) named "email".
+  # Real Request properties and objects that are not a user value are excluded. Method names such as
+  # url/path/ip/method are NOT excluded: as properties they go through __get and return the input
+  # field of that name.
+  - patterns:
+      - pattern: $REQ->$KEY
+      - metavariable-regex: {metavariable: $REQ, regex: '^\$?(request|req)$'}
+      - metavariable-regex: {metavariable: $KEY, regex: '^(?!\$?(user|session|route|cookie|file|files|server|headers?|attributes)$).+'}
+  - pattern: request()->input(...)
+  - pattern: request()->all()
+  - pattern: request()->get(...)
+  - pattern: request()->only(...)
+  - pattern: request()->query(...)
+  - pattern: request()->route(...)
+  - pattern: request()->json(...)
+  - pattern: request()->post(...)
+  - pattern: request()->header(...)
+  - pattern: request()->cookie(...)
+  - pattern: request()->file(...)
+  - pattern: request($KEY, ...)
+  - pattern: Request::input(...)
+  - pattern: Request::all()
+  - pattern: Request::get(...)
+  - pattern: Request::query(...)
+  - pattern: Input::get(...)
+  - pattern: Input::all()
+  - pattern: Route::current()->parameter(...)
+  - pattern: $_GET[$KEY]
+  - pattern: $_POST[$KEY]
+  - pattern: $_REQUEST[$KEY]
+  - pattern: $_COOKIE[$KEY]
+  - pattern: $_FILES[$KEY]
+  - pattern: $_SERVER['QUERY_STRING']
+  - pattern: $_SERVER['REQUEST_URI']
+  - pattern: file_get_contents('php://input')
+sanitizers: []
+sinks:
+  sql-injection:
+    title: Request data reaches raw SQL text
+    owasp: A05
+    cwe: CWE-89
+    severity: high
+    message: Request-controlled data reaches the SQL text argument of a raw query.
+    fix: Use query-builder predicates or placeholders with a separate bindings array; allow-list SQL identifiers (columns, sort direction).
+    sanitizers:
+      - pattern: intval(...)
+      - pattern: floatval(...)
+      - pattern: (int) $VALUE
+      - pattern: (float) $VALUE
+      - patterns:
+          - pattern: $ALLOW[$KEY]
+          - metavariable-regex: {metavariable: $ALLOW, regex: '^\$?[A-Z][A-Z0-9_]+$'}
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: DB::raw($SQL)
+              - pattern: DB::select($SQL, ...)
+              - pattern: DB::statement($SQL, ...)
+              - pattern: DB::unprepared($SQL)
+              - pattern: DB::insert($SQL, ...)
+              - pattern: DB::update($SQL, ...)
+              - pattern: DB::delete($SQL, ...)
+              - pattern: $QUERY->whereRaw($SQL, ...)
+              - pattern: $QUERY->orWhereRaw($SQL, ...)
+              - pattern: $QUERY->havingRaw($SQL, ...)
+              - pattern: $QUERY->selectRaw($SQL, ...)
+              - pattern: $QUERY->orderByRaw($SQL, ...)
+              - pattern: $QUERY->groupByRaw($SQL, ...)
+              - pattern: mysqli_query($LINK, $SQL, ...)
+              - pattern: $CONN->executeQuery($SQL, ...)
+              - pattern: $CONN->executeStatement($SQL, ...)
+              - pattern: $EM->createQuery($SQL, ...)
+              - pattern: $EM->createNativeQuery($SQL, ...)
+          - focus-metavariable: $SQL
+      - patterns:   # PDO / mysqli objects: constrain the receiver, `query`/`exec` are common names
+          - pattern-either:
+              - pattern: $DB->query($SQL, ...)
+              - pattern: $DB->exec($SQL)
+              - pattern: $DB->prepare($SQL, ...)
+          - metavariable-regex: {metavariable: $DB, regex: '^\$?(pdo|db|dbh|conn|connection|mysqli|link)$'}
+          - focus-metavariable: $SQL
+    examples:
+      bad:
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->input('id');
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->quotationId;
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->only('id');
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->header('x-id');
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = request()->get('id');
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = request('id');
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe() {
+            $value = Input::get('id');
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            return User::whereRaw("name = '" . $request->name . "'")->get();
+          }
+        - |
+          <?php
+          function probe($request) {
+            $sort = $request->query->get('sort');
+            return $conn->executeQuery("SELECT * FROM users ORDER BY " . $sort);
+          }
+        - |
+          <?php
+          function probe() {
+            $id = $_GET['id'];
+            return $pdo->query("SELECT * FROM users WHERE id = " . $id);
+          }
+        - |
+          <?php
+          function probe() {
+            return mysqli_query($link, "SELECT * FROM users WHERE id = " . $_POST['id']);
+          }
+      good:
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->input('id');
+            return DB::select("SELECT * FROM users WHERE id = ?", [$value]);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->quotationId;
+            return DB::select("SELECT * FROM users WHERE id = ?", [$value]);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = (float) $request->input('amount');
+            return DB::select("SELECT * FROM users WHERE amount = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = intval($request->route('id'));
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe($request) {
+            $value = $request->user;
+            return DB::select("SELECT * FROM users WHERE id = " . $value);
+          }
+        - |
+          <?php
+          function probe() {
+            $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+            return $stmt->execute([$_GET['id']]);
+          }
+
+  xss:
+    title: Request data reaches unescaped HTML output
+    owasp: A05
+    cwe: CWE-79
+    severity: high
+    message: Request data reaches a raw HTML output sink.
+    fix: Use Blade's escaped output ({{ }}) or e()/htmlspecialchars() at the output boundary.
+    sanitizers:
+      - pattern: e(...)
+      - pattern: htmlspecialchars(...)
+      - pattern: htmlentities(...)
+      - pattern: intval(...)
+      - pattern: (int) $VALUE
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: echo $HTML;
+              - pattern: print($HTML);
+          - focus-metavariable: $HTML
+    examples:
+      bad: |
+        <?php
+        function renderName($request) {
+          $name = $request->input('name');
+          echo $name;
+        }
+      good: |
+        <?php
+        function renderName($request) {
+          $name = $request->input('name');
+          echo e($name);
+        }
+
+  unsafe-deserialization:
+    title: Request data reaches PHP unserialize
+    owasp: A08
+    cwe: CWE-502
+    severity: high
+    message: Request-controlled bytes are passed to PHP object deserialization.
+    fix: Use a data-only format such as JSON; if legacy serialization is required, pass ['allowed_classes' => false] and validate the result.
+    sinks:
+      - patterns:
+          - pattern: unserialize($DATA, ...)
+          - pattern-not: "unserialize($DATA, ['allowed_classes' => false])"
+          - focus-metavariable: $DATA
+    examples:
+      bad: |
+        <?php
+        function restore($request) {
+          return unserialize($request->input('state'));
+        }
+      good:
+        - |
+          <?php
+          function restore($request) {
+            return json_decode($request->input('state'), true);
+          }
+        - |
+          <?php
+          function restore($request) {
+            return unserialize($request->input('state'), ['allowed_classes' => false]);
+          }
+
+  command-injection:
+    title: Request data reaches a shell command
+    owasp: A05
+    cwe: CWE-78
+    severity: critical
+    message: Request-controlled data reaches a shell-executing function.
+    fix: Avoid the shell; run a fixed executable with an argument array (Symfony Process with an array) or strictly validated arguments.
+    sanitizers:
+      - pattern: escapeshellarg(...)
+      - pattern: escapeshellcmd(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: exec($CMD, ...)
+              - pattern: shell_exec($CMD)
+              - pattern: system($CMD, ...)
+              - pattern: passthru($CMD, ...)
+              - pattern: popen($CMD, ...)
+              - pattern: proc_open($CMD, ...)
+              - pattern: Process::fromShellCommandline($CMD, ...)
+          - focus-metavariable: $CMD
+    examples:
+      bad:
+        - |
+          <?php
+          function lookup($request) {
+            $host = $request->input('host');
+            return shell_exec('ping ' . $host);
+          }
+        - |
+          <?php
+          function lookup($request) {
+            return Process::fromShellCommandline('ping ' . $request->host)->run();
+          }
+      good: |
+        <?php
+        function lookup($request) {
+          $host = escapeshellarg($request->input('host'));
+          return shell_exec('ping ' . $host);
+        }
+
+  code-injection:
+    title: Request data reaches eval
+    owasp: A05
+    cwe: CWE-95
+    severity: critical
+    message: Request-controlled data is evaluated as PHP code.
+    fix: Remove dynamic evaluation and parse a constrained data format instead.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($CODE)
+              - pattern: create_function($ARGS, $CODE)
+          - focus-metavariable: $CODE
+    examples:
+      bad: |
+        <?php
+        function calculate($request) {
+          return eval($request->input('expression'));
+        }
+      good: |
+        <?php
+        function calculate($request) {
+          return json_decode($request->input('expression'), true);
+        }
+
+  path-traversal:
+    title: Request data controls a filesystem path
+    owasp: A01
+    cwe: CWE-22
+    severity: high
+    message: Request-controlled data reaches a file path or include target.
+    fix: Use a fixed base directory, canonicalize (realpath) and verify the resolved path stays inside it; prefer a strict allow-list for includes and downloads.
+    sanitizers:
+      - pattern: basename(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: file_get_contents($PATH, ...)
+              - pattern: file_put_contents($PATH, ...)
+              - pattern: fopen($PATH, ...)
+              - pattern: readfile($PATH, ...)
+              - pattern: unlink($PATH, ...)
+              - pattern: include $PATH;
+              - pattern: include_once $PATH;
+              - pattern: require $PATH;
+              - pattern: require_once $PATH;
+              - pattern: Storage::get($PATH)
+              - pattern: Storage::delete($PATH)
+              - pattern: Storage::download($PATH, ...)
+              - pattern: Storage::disk(...)->get($PATH)
+              - pattern: Storage::disk(...)->delete($PATH)
+              - pattern: Storage::disk(...)->download($PATH, ...)
+              - pattern: response()->download($PATH, ...)
+              - pattern: response()->file($PATH, ...)
+              - pattern: new BinaryFileResponse($PATH, ...)
+          - focus-metavariable: $PATH
+    examples:
+      bad:
+        - |
+          <?php
+          function download($request) {
+            return file_get_contents('/srv/private/' . $request->input('file'));
+          }
+        - |
+          <?php
+          function download($request) {
+            return response()->download(storage_path('exports/' . $request->name));
+          }
+      good: |
+        <?php
+        function download($request) {
+          $name = basename($request->input('file'));
+          return file_get_contents('/srv/public/' . $name);
+        }
+
+  upload-path:
+    title: Request data controls an uploaded file name or directory
+    owasp: A01
+    cwe: CWE-22
+    severity: high
+    message: Request-controlled path/name reaches a file move or storeAs operation.
+    fix: Generate the stored name server-side and constrain the destination to a fixed storage directory.
+    sanitizers:
+      - pattern: basename(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $FILE->move($DIR, $NAME, ...)
+              - pattern: $FILE->storeAs($DIR, $NAME, ...)
+          - focus-metavariable: $NAME
+      - patterns:
+          - pattern-either:
+              - pattern: $FILE->move($DIR, ...)
+              - pattern: $FILE->storeAs($DIR, ...)
+              - pattern: $FILE->store($DIR, ...)
+          - focus-metavariable: $DIR
+    examples:
+      bad: |
+        <?php
+        function upload($request) {
+          $name = $request->input('name');
+          return $request->file('upload')->storeAs('documents', $name);
+        }
+      good: |
+        <?php
+        function upload($request) {
+          $name = basename($request->input('name'));
+          return $request->file('upload')->storeAs('documents', $name);
+        }
+
+  auth-bypass:
+    title: Request data selects the authenticated user
+    owasp: A07
+    cwe: CWE-639
+    severity: critical
+    message: Request-controlled identity data is passed to an authentication state setter.
+    fix: Authenticate through the normal credential/session flow and authorize the selected user; never choose the principal from an untrusted identifier.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Auth::loginUsingId($ID, ...)
+              - pattern: Auth::onceUsingId($ID)
+              - pattern: Auth::guard(...)->loginUsingId($ID, ...)
+              - pattern: auth()->loginUsingId($ID, ...)
+              - pattern: auth(...)->loginUsingId($ID, ...)
+              - pattern: Auth::setUser($ID)
+              - pattern: Auth::guard(...)->setUser($ID)
+              - pattern: auth()->setUser($ID)
+              - pattern: auth(...)->setUser($ID)
+          - focus-metavariable: $ID
+    examples:
+      bad:
+        - |
+          <?php
+          function impersonate($request) {
+            return Auth::loginUsingId($request->input('user_id'));
+          }
+        - |
+          <?php
+          function impersonate($request) {
+            return auth('api')->loginUsingId($request->uid);
+          }
+      good: |
+        <?php
+        function currentUser() {
+          return Auth::user();
+        }
+
+  open-redirect:
+    title: Request data controls a redirect destination
+    owasp: A01
+    cwe: CWE-601
+    severity: medium
+    message: Request-controlled data determines the browser redirect target.
+    fix: Redirect to relative paths or select a destination from a strict server-side allow-list.
+    sanitizers:
+      - patterns:
+          - pattern: $ALLOW[$KEY]
+          - metavariable-regex: {metavariable: $ALLOW, regex: '^\$?[A-Z][A-Z0-9_]+$'}
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: redirect($URL, ...)
+              - pattern: redirect()->to($URL, ...)
+              - pattern: redirect()->away($URL, ...)
+              - pattern: Redirect::to($URL, ...)
+              - pattern: Redirect::away($URL, ...)
+              - pattern: new RedirectResponse($URL, ...)
+              - pattern: 'header("Location: " . $URL, ...)'
+          - focus-metavariable: $URL
+    examples:
+      bad:
+        - |
+          <?php
+          function continueTo($request) {
+            return redirect()->away($request->input('next'));
+          }
+        - |
+          <?php
+          function continueTo() {
+            header("Location: " . $_GET['next']);
+          }
+      good: |
+        <?php
+        function continueTo($request) {
+          $destination = $ALLOWED_REDIRECTS[$request->input('next')] ?? '/';
+          return redirect()->to($destination);
+        }
+
+  ssrf:
+    title: Request data controls an outbound HTTP URL
+    owasp: A01
+    cwe: CWE-918
+    severity: high
+    message: Request-controlled data reaches an outbound HTTP request URL.
+    fix: Keep the host fixed and allow-list destinations after resolving/validating them; pass user values only as path/query data.
+    sanitizers:
+      - patterns:
+          - pattern: $ALLOW[$KEY]
+          - metavariable-regex: {metavariable: $ALLOW, regex: '^\$?[A-Z][A-Z0-9_]+$'}
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: curl_init($URL)
+              - pattern: curl_setopt($CH, CURLOPT_URL, $URL)
+              - pattern: Http::get($URL, ...)
+              - pattern: Http::post($URL, ...)
+              - pattern: Http::put($URL, ...)
+              - pattern: Http::delete($URL, ...)
+              - pattern: $CLIENT->request($METHOD, $URL, ...)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern-either:
+              - pattern: $CLIENT->get($URL, ...)
+              - pattern: $CLIENT->post($URL, ...)
+          - metavariable-regex: {metavariable: $CLIENT, regex: '^\$?(client|http|guzzle|guzzleClient|httpClient)$'}
+          - focus-metavariable: $URL
+    examples:
+      bad:
+        - |
+          <?php
+          function fetchRemote($request) {
+            return Http::get($request->input('url'));
+          }
+        - |
+          <?php
+          function fetchRemote($request) {
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $request->url);
+            return curl_exec($ch);
+          }
+      good: |
+        <?php
+        function fetchRemote($request) {
+          $url = $ALLOWED_URLS[$request->input('target')];
+          return Http::get($url);
+        }
+
+  external-messaging:
+    title: Request data selects an email or SMS recipient
+    owasp: A06
+    cwe: CWE-799
+    severity: medium
+    message: Request-controlled destinations can trigger email or SMS delivery to arbitrary recipients.
+    fix: Resolve recipients from authorized server-side records, validate ownership, and apply per-user rate limits/quotas.
+    impact: Spam or phishing sent from the application's domain or number, and SMS/email cost driven by an attacker.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Mail::to($DESTINATION, ...)
+              - pattern: Notification::route('mail', $DESTINATION)
+              - pattern: Notification::route('nexmo', $DESTINATION)
+              - pattern: Notification::route('vonage', $DESTINATION)
+              - pattern: SMS::to($DESTINATION, ...)
+              - pattern: Sms::to($DESTINATION, ...)
+              - pattern: $SMS->messages->create($DESTINATION, ...)
+          - focus-metavariable: $DESTINATION
+    examples:
+      bad: |
+        <?php
+        function sendNotice($request) {
+          return Mail::to($request->input('email'))->send(new NoticeMail());
+        }
+      good: |
+        <?php
+        function sendNotice() {
+          return Mail::to(config('mail.support_address'))->send(new NoticeMail());
+        }
+
+crossfile_example:
+  expect: sql-injection
+  files:
+    UserController.php: |
+      <?php
+      class UserController {
+        public function search(Request $request) {
+          return $this->users->findByName($request->input('name'));
+        }
+      }
+    UserRepository.php: |
+      <?php
+      class UserRepository {
+        public function findByName(string $name, int $limit = 20) {
+          return DB::select("SELECT * FROM users WHERE name = '" . $name . "' LIMIT " . $limit);
+        }
+      }

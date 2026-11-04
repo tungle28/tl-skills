@@ -1,0 +1,177 @@
+# Taint spec — Dart / Flutter client. Untrusted input on mobile = data another app, a web page or a
+# server push can control: deep links / app links, route parameters, push notification payloads,
+# WebView JavaScript channel messages.
+# Reserved metavariables: $SAFN $SAP $SARV $SATY $SARET $SABODY $SAE $SAO $SAX $SART
+language: dart
+engine_languages: [dart]
+inventory_languages: [dart]
+example_ext: .dart
+function_scopes:
+  - |
+    $SARET $SAFN(..., $SATY $SAP, ...) { ... }
+  - |
+    $SARET $SAFN(..., $SATY $SAP, ...) async { ... }
+  - |
+    $SARET $SAFN(..., $SATY $SAP, ...) => $SAE;
+sources:
+  - patterns:
+      - pattern: $U.$A
+      - metavariable-regex: {metavariable: $A, regex: '^(queryParameters|queryParametersAll|pathSegments|fragment|query)$'}
+  - patterns:
+      - pattern: $STATE.$A
+      - metavariable-regex: {metavariable: $A, regex: '^(pathParameters|queryParameters|extra|uri)$'}
+      - metavariable-regex: {metavariable: $STATE, regex: '^(state|goRouterState|routeState)$'}
+  - patterns:
+      - pattern-inside: |
+          (JavaScriptMessage $M) { ... }
+      - pattern: $M.message
+  - patterns:
+      - pattern-inside: |
+          (JavaScriptMessage $M) => $E
+      - pattern: $M.message
+  - patterns:
+      - pattern-either:
+          - pattern-inside: |
+              (RemoteMessage $M) { ... }
+          - pattern-inside: |
+              (RemoteMessage $M) async { ... }
+          - pattern-inside: |
+              $R $F(RemoteMessage $M) async { ... }
+          - pattern-inside: |
+              $R $F(RemoteMessage $M) { ... }
+      - pattern: $M.data
+  - patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $S.uriLinkStream.listen(($L) { ... })
+          - pattern-inside: |
+              $S.uriLinkStream.listen(($L) => $E)
+      - pattern: $L
+sanitizers:
+  - pattern: int.parse(...)
+  - pattern: int.tryParse(...)
+  - pattern: double.parse(...)
+sinks:
+  sql-injection:
+    title: Untrusted input reaches a local SQL query
+    owasp: A05
+    cwe: CWE-89
+    severity: medium
+    message: Deep-link/push/WebView data flows into raw SQLite SQL.
+    fix: Use ? placeholders with arguments (rawQuery(sql, [v])) or db.query(where:, whereArgs:).
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.rawQuery($Q, ...)
+              - pattern: $DB.rawInsert($Q, ...)
+              - pattern: $DB.rawUpdate($Q, ...)
+              - pattern: $DB.rawDelete($Q, ...)
+              - pattern: $DB.execute($Q, ...)
+              - pattern: $DB.customSelect($Q, ...)
+          - focus-metavariable: $Q
+    examples:
+      bad: |
+        void onLink(Uri uri, Database db) {
+          final id = uri.queryParameters['id'];
+          db.rawQuery("SELECT * FROM notes WHERE id = '$id'");
+        }
+      good: |
+        void onLink(Uri uri, Database db) {
+          final id = uri.queryParameters['id'];
+          db.rawQuery('SELECT * FROM notes WHERE id = ?', [id]);
+        }
+  webview-injection:
+    title: Untrusted input loaded into a WebView or external launcher
+    owasp: A05
+    cwe: CWE-79
+    severity: high
+    message: Deep-link/push/WebView data decides which URL or HTML a WebView loads (or which URL is launched), enabling phishing inside the app or script access to JS bridges.
+    fix: Validate against an allow-list of HTTPS hosts before loading/launching; never load HTML from untrusted input.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $C.loadRequest($X, ...)
+              - pattern: $C.loadUrl(...)
+              - pattern: $C.loadHtmlString($X, ...)
+              - pattern: $C.runJavaScript($X)
+              - pattern: $C.evaluateJavascript(...)
+              - pattern: launchUrl($X, ...)
+              - pattern: launchUrlString($X, ...)
+              - pattern: launch($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        void open(Uri uri, WebViewController c) {
+          final next = uri.queryParameters['next']!;
+          c.loadRequest(Uri.parse(next));
+        }
+      good: |
+        void open(Uri uri, WebViewController c) {
+          c.loadRequest(Uri.parse('https://app.example.com/help'));
+        }
+  navigation-injection:
+    title: Untrusted input selects an in-app route
+    owasp: A01
+    cwe: CWE-939
+    severity: low
+    message: Deep-link/push data is used directly as a navigation target, which can open screens (payment, settings) the user did not intend.
+    fix: Map link parameters to an allow-list of routes; require confirmation and an authenticated session for sensitive screens.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CTX.go($X, ...)
+              - pattern: $CTX.push($X, ...)
+              - pattern: $CTX.pushReplacement($X, ...)
+              - pattern: Navigator.pushNamed($C, $X, ...)
+              - pattern: $NAV.pushNamed($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        void handle(RemoteMessage m) {
+          router.go(m.data['route']);
+        }
+      good: |
+        void handle(RemoteMessage m) {
+          router.go('/inbox');
+        }
+  path-traversal:
+    title: Untrusted input used as a file path
+    owasp: A01
+    cwe: CWE-22
+    severity: medium
+    message: Deep-link/push/WebView data flows into a local file path.
+    fix: Use path.basename and keep files inside the app's documents directory.
+    sanitizers:
+      - pattern: basename(...)
+      - pattern: p.basename(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: File($X)
+              - pattern: Directory($X)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        void save(Uri uri) {
+          final f = File('/data/app/' + uri.queryParameters['name']!);
+        }
+      good: |
+        void save(Uri uri) {
+          final f = File('/data/app/' + basename(uri.queryParameters['name']!));
+        }
+crossfile_example:
+  expect: webview-injection
+  files:
+    lib/links.dart: |
+      class LinkHandler {
+        void init(AppLinks appLinks, WebViewController c) {
+          appLinks.uriLinkStream.listen((uri) {
+            final target = uri.queryParameters['url']!;
+            openInWebView(c, target);
+          });
+        }
+      }
+    lib/webview_helper.dart: |
+      void openInWebView(WebViewController controller, String address) {
+        controller.loadRequest(Uri.parse(address));
+      }

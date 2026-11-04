@@ -1,0 +1,307 @@
+# Go: net/http, gin, echo, chi, fiber, gorilla/mux, database/sql, pgx, sqlx, gorm, sqlc.
+# Single-file regex, no taint: "is this value caller-controlled?" questions are gates.
+rules:
+  # ------------------------------------------------------------------ injection (A05)
+  - id: go-sql-sprintf
+    title: SQL built with fmt.Sprintf or concatenation
+    languages: [go]
+    pattern: '\.(?:Query|QueryRow|QueryContext|QueryRowContext|Exec|ExecContext|Get|Select|NamedExec|Prepare|PrepareContext)\s*\(\s*(?:ctx\s*,\s*)?(?:fmt\.Sprintf\s*\(|"[^"]*"\s*\+|`[^`]*`\s*\+)'
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-89
+    message: Values formatted or concatenated into the SQL string become SQL text; database/sql, pgx and sqlx only parameterize arguments passed separately.
+    fix: Use placeholders ($1 / ?) and pass values as arguments; allow-list identifiers such as ORDER BY columns.
+    examples:
+      bad: ['rows, err := db.Query(fmt.Sprintf("SELECT * FROM users WHERE name = ''%s''", name))', 'db.ExecContext(ctx, "DELETE FROM t WHERE id = " + id)']
+      good: ['rows, err := db.Query("SELECT * FROM users WHERE name = $1", name)']
+
+  - id: go-gorm-raw-sprintf
+    title: GORM raw SQL / string conditions built from strings
+    languages: [go]
+    pattern: '\.(?:Raw|Exec|Where|Or|Not|Order|Group|Having|Joins|Select)\s*\(\s*(?:fmt\.Sprintf\s*\(|"[^"]*"\s*\+\s*\w)'
+    file_requires: 'gorm\.io/gorm|\*gorm\.DB'
+    severity: high
+    confidence: medium
+    owasp: A05
+    cwe: CWE-89
+    message: GORM parameterizes `?` placeholders only; a condition string assembled with Sprintf/concatenation is injectable (Order/Group/Select take raw SQL).
+    fix: Use `Where("name = ?", name)`, struct/map conditions, and allow-list column names for Order/Select.
+    examples:
+      bad: ["// *gorm.DB\ndb.Where(fmt.Sprintf(\"name = '%s'\", name)).Find(&users)", "// *gorm.DB\ndb.Order(\"created_at \" + dir)"]
+      good: ["// *gorm.DB\ndb.Where(\"name = ?\", name).Find(&users)"]
+
+  - id: go-exec-command
+    title: External command with variable program or shell
+    type: gate
+    languages: [go]
+    pattern: '\bexec\.Command(?:Context)?\s*\(\s*(?:ctx\s*,\s*)?(?:[A-Za-z_][\w.]*\s*[,)]|"(?:/bin/)?(?:ba|z)?sh"|"cmd(?:\.exe)?")'
+    owasp: A05
+    cwe: CWE-78
+    question: Is the program or any argument caller-controlled? A shell (sh -c / cmd /c) with interpolated input is command injection; prefer a fixed binary with an argument slice and validated arguments.
+    examples:
+      bad: ['out, _ := exec.Command("sh", "-c", "ping "+host).Output()', 'exec.CommandContext(ctx, tool, args...)']
+      good: ['exec.Command("git", "status")']
+
+  - id: go-template-html-unescaped
+    title: HTML escaping bypassed (template.HTML / text/template)
+    languages: [go]
+    pattern: '\btemplate\.(?:HTML|JS|URL|HTMLAttr|CSS)\s*\((?!\s*"[^"]*"\s*\))|^\s*"text/template"'
+    file_requires: 'http\.ResponseWriter|gin\.Context|echo\.Context|fiber\.Ctx|\.html'
+    severity: medium
+    confidence: medium
+    owasp: A05
+    cwe: CWE-79
+    message: template.HTML/JS/URL mark content as trusted and skip html/template escaping; text/template never escapes, so using it for HTML responses is XSS-prone.
+    fix: Use html/template and pass plain strings; sanitize (bluemonday) before converting user HTML to template.HTML.
+    examples:
+      bad: ["func h(w http.ResponseWriter, r *http.Request) {\n  data := template.HTML(comment.Body)", "import (\n\t\"text/template\"\n)\n// http.ResponseWriter"]
+      good: ["func h(w http.ResponseWriter, r *http.Request) {\n  data := template.HTML(\"<br>\")"]
+
+  # ------------------------------------------------------------------ crypto / TLS (A04)
+  - id: go-tls-insecure-skip-verify
+    title: TLS certificate verification disabled
+    languages: [go]
+    pattern: '\bInsecureSkipVerify\s*:\s*true'
+    severity: high
+    confidence: high
+    owasp: A04
+    cwe: CWE-295
+    message: The client accepts any certificate, so the connection can be intercepted.
+    fix: Remove it; for private CAs set RootCAs from a pinned CA pool.
+    examples:
+      bad: ['tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}']
+      good: ['&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}']
+
+  - id: go-tls-min-version
+    title: Weak TLS minimum version
+    languages: [go]
+    pattern: '\bMinVersion\s*:\s*tls\.Version(?:SSL30|TLS10|TLS11)\b'
+    severity: medium
+    confidence: high
+    owasp: A04
+    cwe: CWE-326
+    message: TLS 1.0/1.1 are deprecated and weak.
+    fix: Use MinVersion tls.VersionTLS12 (or 1.3).
+    examples:
+      bad: ['&tls.Config{MinVersion: tls.VersionTLS10}']
+      good: ['&tls.Config{MinVersion: tls.VersionTLS12}']
+
+  - id: go-weak-crypto-import
+    title: Weak hash or cipher package imported
+    languages: [go]
+    pattern: '^\s*(?:\w+\s+)?"crypto/(?:md5|sha1|des|rc4)"'
+    severity: medium
+    confidence: medium
+    owasp: A04
+    cwe: CWE-327
+    message: MD5/SHA1/DES/RC4 are unsuitable for passwords, signatures or encryption.
+    fix: Passwords → golang.org/x/crypto/argon2 or bcrypt; integrity → crypto/sha256; encryption → AES-GCM (crypto/cipher). Checksum-only use of md5 can stay if documented.
+    examples:
+      bad: ['import "crypto/md5"', "import (\n\t\"crypto/sha1\"\n)"]
+      good: ['import "crypto/sha256"']
+
+  - id: go-math-rand-security
+    title: math/rand used in security-sensitive code
+    languages: [go]
+    pattern: '^\s*(?:\w+\s+)?"math/rand(?:/v2)?"'
+    file_requires: '(?i)(token|otp|password|secret|salt|nonce|reset|session|apikey)'
+    severity: medium
+    confidence: low
+    owasp: A04
+    cwe: CWE-338
+    message: math/rand is predictable; tokens, OTPs or salts derived from it can be guessed.
+    fix: Use crypto/rand (rand.Read, rand.Int, rand.Text in Go 1.24+).
+    examples:
+      bad: ["import \"math/rand\"\nfunc NewResetToken() string {"]
+      good: ["import \"crypto/rand\"\nfunc NewResetToken() string {"]
+
+  # ------------------------------------------------------------------ authentication (A07)
+  - id: go-jwt-parse-unverified
+    title: JWT parsed without signature verification
+    languages: [go]
+    pattern: '\.ParseUnverified\s*\(|jwt\.WithoutClaimsValidation\s*\(|SkipClaimsValidation\s*:\s*true'
+    severity: high
+    confidence: medium
+    owasp: A07
+    cwe: CWE-347
+    message: Claims from an unverified token (or with claims validation skipped) can be forged or expired.
+    fix: Use jwt.Parse/ParseWithClaims with a keyfunc that checks token.Method and returns the expected key; keep exp/nbf validation.
+    examples:
+      bad: ['tok, _, err := parser.ParseUnverified(raw, &claims)']
+      good: ['tok, err := jwt.ParseWithClaims(raw, &claims, keyFunc, jwt.WithValidMethods([]string{"RS256"}))']
+
+  - id: go-jwt-keyfunc
+    title: JWT keyfunc — algorithm pinning to confirm
+    type: gate
+    languages: [go]
+    pattern: '\bjwt\.Parse(?:WithClaims)?\s*\('
+    context_not: 'WithValidMethods|\.Method\.\(\*jwt\.SigningMethod|SigningMethod\w*\)\s*;?\s*!ok|token\.Method\.Alg\(\)'
+    context_lines: 8
+    owasp: A07
+    cwe: CWE-347
+    question: Does the keyfunc (or jwt.WithValidMethods) restrict the signing algorithm? Without it, algorithm-confusion (e.g. HS256 signed with a public RSA key) may be possible depending on the key returned.
+    examples:
+      bad: ['token, err := jwt.Parse(raw, func(t *jwt.Token) (interface{}, error) { return key, nil })']
+      good: ['token, err := jwt.Parse(raw, kf, jwt.WithValidMethods([]string{"RS256"}))']
+
+  - id: go-cookie-insecure
+    title: Cookie without HttpOnly/Secure
+    languages: [go]
+    pattern: '\b(?:HttpOnly|Secure)\s*:\s*false\b|\.SetCookie\s*\([^)]*,\s*false\s*,\s*false\s*\)'
+    severity: medium
+    confidence: medium
+    owasp: A07
+    cwe: CWE-614
+    message: Session cookies must be HttpOnly and Secure.
+    fix: Set HttpOnly true, Secure true, SameSite Lax/Strict (http.Cookie or gin SetCookie secure/httpOnly args).
+    examples:
+      bad: ['http.SetCookie(w, &http.Cookie{Name: "sid", Value: v, HttpOnly: false})', 'c.SetCookie("sid", v, 3600, "/", "", false, false)']
+      good: ['http.SetCookie(w, &http.Cookie{Name: "sid", Value: v, HttpOnly: true, Secure: true})']
+
+  # ------------------------------------------------------------------ access control / SSRF / paths (A01) — gates
+  - id: go-handler-id-param
+    title: Handler binds an object id from the request
+    type: gate
+    languages: [go]
+    pattern: '\b\w+\.(?:Param|Params|ParamsInt|QueryParam|Query|DefaultQuery|FormValue)\s*\(\s*"\w*(?:[iI][dD]|Code|No)"|\bchi\.URLParam\s*\(\s*\w+\s*,\s*"\w*(?:[iI][dD]|Code)"|\bmux\.Vars\s*\(\s*\w+\s*\)\s*\[\s*"\w*(?:[iI][dD]|Code)"|\.PathValue\s*\(\s*"\w*(?:[iI][dD]|Code)"'
+    owasp: A01
+    cwe: CWE-639
+    question: Is the caller's claim to this id verified — route-group middleware, a caller/tenant value passed to and used by the service, or a tenant/owner clause in the query? For deletes/updates, also state who can reach the write (blast radius).
+    guidance: Walk route registration (router groups + middleware) → handler → service → SQL (sqlc .sql file). Compare with sibling handlers in the same file.
+    examples:
+      bad: ['id := c.Param("id")', 'accountID := chi.URLParam(r, "accountID")', 'id := mux.Vars(r)["orderId"]', 'id := r.PathValue("id")']
+      good: ['page := c.Query("page")']
+
+  - id: go-sql-no-tenant
+    title: SQL statement filtered by id alone (no owner/tenant column)
+    type: gate
+    languages: [sql]
+    paths: {exclude: ["*migrations/*", "*migration/*", "*schema*.sql", "*seed*.sql"]}
+    pattern: '(?i)\b(?:UPDATE\s+\w+|DELETE\s+FROM\s+\w+|SELECT\b[^;]*?\bFROM\s+\w+)(?![^;]*\b(?:tenant_id|owner_id|org_id|organization_id|user_id|customer_id|account_owner_id|created_by)\b)[^;]*?\bWHERE\s+(?:\w+\.)?(?:id|external_id|uuid)\s*=\s*(?:\$\d+|\?|@\w+|sqlc\.arg\(\s*\w+\s*\)|:\w+)'
+    owasp: A01
+    cwe: CWE-639
+    question: Does every caller of this query resolve the id through an earlier tenant/owner-scoped lookup, or can a request-supplied id from another tenant reach it? Check row-level security in migrations too. (Reference/lookup tables are fine — say so.)
+    examples:
+      bad: ["-- name: GetAccount :one\nSELECT * FROM accounts WHERE id = $1;", "-- name: DeleteOrder :exec\nDELETE FROM orders WHERE id = $1;"]
+      good: ["-- name: GetAccount :one\nSELECT * FROM accounts WHERE id = $1 AND owner_id = $2;"]
+
+  - id: go-ssrf
+    title: Outbound request to a variable URL
+    type: gate
+    languages: [go]
+    pattern: '\bhttp\.(?:Get|Post|Head|PostForm)\s*\(\s*[A-Za-z_]|\bhttp\.NewRequest(?:WithContext)?\s*\([^)]*,\s*[A-Za-z_][\w.]*\s*[,)]'
+    owasp: A01
+    cwe: CWE-918
+    question: Can the caller influence the host? If so, is there a host allow-list and a block on private/loopback/link-local (169.254.169.254) addresses checked after DNS resolution and on redirects (custom Dialer Control / CheckRedirect)?
+    examples:
+      bad: ['resp, err := http.Get(req.URL)', 'r, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)']
+      good: ['resp, err := http.Get("https://api.example.com/health")']
+
+  - id: go-path-traversal
+    title: File path assembled from a variable
+    type: gate
+    languages: [go]
+    pattern: '\b(?:os\.(?:Open|OpenFile|ReadFile|Create|Remove|RemoveAll|WriteFile)|ioutil\.ReadFile|http\.ServeFile|c\.File|c\.FileAttachment|c\.SendFile)\s*\([^)]*(?:\+|filepath\.Join|path\.Join)'
+    owasp: A01
+    cwe: CWE-22
+    question: Is any part caller-controlled? filepath.Join does not prevent `..`; check for filepath.Clean + a prefix check against the base dir, os.Root (Go 1.24), or filepath.IsLocal.
+    examples:
+      bad: ['f, err := os.Open(filepath.Join(baseDir, name))', 'c.File("uploads/" + c.Param("name"))']
+      good: ['f, err := os.Open("config.yaml")']
+
+  - id: go-open-redirect
+    title: Redirect to a request-controlled URL
+    type: gate
+    languages: [go]
+    pattern: '\b(?:http\.Redirect\s*\(\s*\w+\s*,\s*\w+\s*,|c\.Redirect\s*\(\s*[\w.]+\s*,)\s*(?:r\.URL\.Query\(\)\.Get|r\.FormValue|c\.Query|c\.QueryParam|c\.FormValue|next|returnURL|redirect)'
+    owasp: A01
+    cwe: CWE-601
+    question: Is the target limited to relative paths or an allow-list of hosts?
+    examples:
+      bad: ['http.Redirect(w, r, r.URL.Query().Get("next"), http.StatusFound)', 'c.Redirect(http.StatusFound, c.Query("redirect"))']
+
+  # ------------------------------------------------------------------ misconfiguration / errors (A02, A10)
+  - id: go-cors-wildcard-credentials
+    title: CORS allows all origins with credentials
+    languages: [go]
+    pattern: 'AllowAllOrigins\s*:\s*true|AllowOrigins\s*:\s*\[\]string\s*\{\s*"\*"\s*\}|AllowOriginFunc\s*:\s*func\s*\([^)]*\)\s*bool\s*\{\s*return\s+true|AllowOrigins\s*:\s*"\*"'
+    file_requires: 'AllowCredentials\s*:\s*true'
+    severity: high
+    confidence: medium
+    owasp: A02
+    cwe: CWE-942
+    message: Any origin can make credentialed requests and read responses as the user.
+    fix: Configure an explicit origin allow-list.
+    examples:
+      bad: ["cors.New(cors.Config{AllowAllOrigins: true, AllowCredentials: true})", "cors.Options{AllowOriginFunc: func(r *http.Request, o string) bool { return true }, AllowCredentials: true}"]
+      good: ["cors.New(cors.Config{AllowOrigins: []string{\"https://app.example.com\"}, AllowCredentials: true})"]
+
+  - id: go-pprof-exposed
+    title: net/http/pprof registered
+    languages: [go]
+    pattern: '^\s*_\s+"net/http/pprof"|\bpprof\.Register\s*\(|\bpprof\.Index\b'
+    severity: medium
+    confidence: medium
+    owasp: A02
+    cwe: CWE-215
+    message: pprof endpoints leak memory contents, goroutine stacks and allow CPU-heavy profiling; the blank import registers them on http.DefaultServeMux.
+    fix: Serve pprof only on a separate localhost/internal listener, or behind admin authentication; never on the public mux.
+    examples:
+      bad: ["import (\n\t_ \"net/http/pprof\"\n)"]
+      good: ['import "net/http"']
+
+  - id: go-gin-debug-mode
+    title: Gin/Echo debug mode enabled in code
+    languages: [go]
+    pattern: '\bgin\.SetMode\s*\(\s*gin\.DebugMode\s*\)|\be\.Debug\s*=\s*true'
+    severity: low
+    confidence: medium
+    owasp: A02
+    cwe: CWE-489
+    message: Debug mode logs routes/requests verbosely and (Echo) returns detailed errors.
+    fix: Drive mode from configuration and default to release mode.
+    examples:
+      bad: ['gin.SetMode(gin.DebugMode)']
+      good: ['gin.SetMode(gin.ReleaseMode)']
+
+  - id: go-http-no-timeouts
+    title: HTTP server without timeouts
+    languages: [go]
+    pattern: '\bhttp\.ListenAndServe(?:TLS)?\s*\(|&http\.Server\s*\{'
+    file_excludes: 'ReadHeaderTimeout|ReadTimeout'
+    severity: low
+    confidence: medium
+    owasp: A06
+    cwe: CWE-400
+    message: Without ReadHeaderTimeout/ReadTimeout a few slow clients can hold connections open indefinitely (slowloris).
+    fix: Use http.Server with ReadHeaderTimeout, ReadTimeout, WriteTimeout, IdleTimeout and MaxHeaderBytes.
+    examples:
+      bad: ['log.Fatal(http.ListenAndServe(":8080", r))']
+      good: ["srv := &http.Server{Addr: \":8080\", ReadHeaderTimeout: 5 * time.Second}"]
+
+  - id: go-error-to-client
+    title: Internal error text returned to the client
+    languages: [go]
+    pattern: '\bhttp\.Error\s*\(\s*\w+\s*,\s*err\.Error\(\)|\.(?:JSON|String|AbortWithStatusJSON)\s*\([^)]*\berr\.Error\(\)'
+    severity: low
+    confidence: medium
+    owasp: A10
+    cwe: CWE-209
+    message: Raw error strings can disclose SQL, file paths or internal hosts.
+    fix: Log the error with a request id; return a generic message and that id.
+    examples:
+      bad: ['http.Error(w, err.Error(), http.StatusInternalServerError)', 'c.JSON(500, gin.H{"error": err.Error()})']
+      good: ['c.JSON(500, gin.H{"error": "internal error", "requestId": rid})']
+
+  - id: go-unbounded-body
+    title: Request body read without size limit
+    type: gate
+    languages: [go]
+    pattern: '\b(?:io|ioutil)\.ReadAll\s*\(\s*(?:r|req|c\.Request)\.Body\s*\)|json\.NewDecoder\s*\(\s*(?:r|req|c\.Request)\.Body\s*\)'
+    file_excludes: 'MaxBytesReader|LimitReader|BodyLimit'
+    owasp: A06
+    cwe: CWE-770
+    question: Is the body size capped (http.MaxBytesReader, a framework body limit, or a reverse-proxy limit)? Unbounded reads let one request exhaust memory.
+    examples:
+      bad: ['body, _ := io.ReadAll(r.Body)']

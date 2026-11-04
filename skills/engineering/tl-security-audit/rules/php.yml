@@ -1,0 +1,140 @@
+# PHP / Laravel / Symfony. Taint (rules/taint/php.yml) finds request data reaching a sink; it cannot
+# see a missing ownership check, a no-op middleware, an early `return` in a verifier or a principal
+# loaded through a DB relation. The gates below anchor review on those sites.
+rules:
+  # ------------------------------------------------------------------ access control (A01) — gates
+  - id: php-route-file
+    title: Route definition file
+    type: gate
+    languages: [php]
+    path_pattern: '(?i)(^|/)routes/[^/]+\.php$'
+    file_requires: '\bRoute::'
+    owasp: A01
+    cwe: CWE-862
+    question: Which routes in this file are reachable without authentication? For each route that reads or changes non-public data, name the middleware that protects it (group, route or controller constructor) and confirm that middleware enforces the role/permission it claims.
+    guidance: Read the group nesting (Route::group/middleware/prefix), the RouteServiceProvider that loads this file, and the Kernel's middleware aliases; a route registered outside the auth group is the usual miss.
+    examples:
+      file: routes/api.php
+      bad: ["<?php\nRoute::get('/orders/{id}', 'OrderController@show');"]
+
+  - id: php-model-by-request-id
+    title: Model loaded or removed by a caller-supplied id/email
+    type: gate
+    languages: [php]
+    pattern: '\b[A-Z]\w*::(?:find|findOrFail|findMany|destroy|whereKey)\s*\(\s*(?:\$request->|request\(|\$_(?:GET|POST|REQUEST)\b|\$(?:id|uuid|\w+_id|\w+Id)\b)|\b[A-Z]\w*::where\s*\(\s*[''"](?:id|uuid|email|phone|\w+_id)[''"]\s*,\s*(?:[''"]=[''"]\s*,\s*)?(?:\$request->|request\()'
+    file_requires: '\$request\b|\bRequest\b|request\(|\bController\b'
+    owasp: A01
+    cwe: CWE-639
+    question: Can the caller pass an id/email of a record they do not own (another user, customer, tenant)? Find where ownership is enforced — policy/Gate (authorize, can), a scoped query (where user_id = auth id), route model binding with a scope — or state that it is not. For delete/update, check it twice.
+    guidance: Look at sibling actions in the same controller and at the policies registered for the model.
+    examples:
+      bad: ['$order = Order::findOrFail($request->id);', "class QuotationController extends Controller {\n  public function remove($id) { Quotation::destroy($id); }",
+            'User::where(''email'', $request->email)->delete();']
+      good: ['$order = $request->user()->orders()->findOrFail($id);']
+
+  - id: php-auth-set-principal
+    title: Code sets the authenticated user directly
+    type: gate
+    languages: [php]
+    pattern: '\b(?:Auth::(?:guard\([^)]*\)->)?|auth\([^)]*\)->)(?:setUser|loginUsingId|onceUsingId|login|once)\s*\('
+    owasp: A07
+    cwe: CWE-287
+    question: Where does this user (or id) come from? It must be the result of a verified credential for that same user (password, OTP, signed token checked here). If it is loaded from a request id/email or through a relation of a request-selected record (e.g. $order->customer), the caller can choose who they become.
+    guidance: Trace the argument back to its source; taint does not follow a DB lookup or an Eloquent relation.
+    examples:
+      bad: ['Auth::setUser($quotation->consumer);', 'auth()->loginUsingId($id);', 'Auth::guard(''api'')->setUser($user);']
+      good: ['$user = Auth::user();']
+
+  - id: php-middleware-handle
+    title: Middleware that guards requests
+    type: gate
+    languages: [php]
+    pattern: '\bfunction\s+handle\s*\(\s*(?:\\?\w+(?:\\\w+)*\s+)?\$request\s*,\s*(?:\\?Closure\s+)?\$next\b'
+    owasp: A01
+    cwe: CWE-285
+    question: Does every path that calls $next($request) actually perform the check — no pass-through when a header/token is missing, no catch block or env flag that lets the request through, no check left commented out? Is it attached to the routes it is meant to protect?
+    examples:
+      bad: ['    public function handle($request, Closure $next)', '    public function handle(Request $request, Closure $next, ...$roles)']
+      good: ['    public function handleEvent($event)']
+
+  - id: php-credential-verifier
+    title: Function that verifies a token, signature or credential
+    type: gate
+    languages: [php]
+    pattern: '\bfunction\s+(?:verify|validate|check)\w*(?:Token|Signature|Otp|Auth|Login|Password|Hmac|Hash|Social)\w*\s*\('
+    ignore_case: true
+    owasp: A07
+    cwe: CWE-287
+    question: Can this verification report success without verifying — an early `return;`/`return true`, a swallowed exception, a commented-out check, a loose `==` comparison, a debug or test bypass? Do callers act on its result (or on an exception) the way it signals failure?
+    examples:
+      bad: ['    public function verifyIdTokenSocial($token, $provider)', 'private function checkSignature(array $payload)']
+      good: ['public function verifiedAt()']
+
+  - id: php-csrf-except
+    title: Routes excluded from CSRF verification
+    type: gate
+    languages: [php]
+    pattern: '\bprotected\s+\$except\s*=\s*\['
+    file_requires: 'VerifyCsrfToken|ValidateCsrfToken'
+    owasp: A01
+    cwe: CWE-352
+    question: Are the excluded routes state-changing and authenticated by session cookie? Only callbacks that verify their own signature (payment/webhook) or token-authenticated APIs belong here.
+    examples:
+      bad: ["class VerifyCsrfToken extends Middleware {\n    protected $except = ['payment/*'];"]
+
+  - id: php-blade-raw-output
+    title: Blade raw output {!! !!}
+    type: gate
+    languages: [php]
+    paths: {include: ['*.blade.php']}
+    pattern: '\{!!(?!\s*(?:csrf_field|method_field|\$errors->)).+?!!\}'
+    owasp: A05
+    cwe: CWE-79
+    question: Is the printed value trusted HTML (built by the app from fixed markup) or sanitized with an HTML sanitizer? If any part comes from a user or an external system, this is stored or reflected XSS.
+    examples:
+      file: resources/views/post.blade.php
+      bad: ['<div>{!! $post->body !!}</div>']
+      good: ['<div>{{ $post->body }}</div>', '{!! csrf_field() !!}']
+
+  # ------------------------------------------------------------------ findings
+  - id: php-mass-assignment-request-all
+    title: Model filled from the whole request
+    languages: [php]
+    pattern: '(?:->|::)(?:create|update|fill|forceFill|forceCreate|updateOrCreate|firstOrCreate|insert)\s*\(\s*(?:\$request->all\(\)|request\(\)->all\(\)|Input::all\(\)|\$_POST\b)'
+    severity: medium
+    confidence: medium
+    owasp: A08
+    cwe: CWE-915
+    message: Every request field is written to the model; unless $fillable is tight, callers can set columns like role, is_admin, user_id or balance.
+    fix: Pass $request->validated() or $request->only([...]) with an explicit field list, and keep $fillable minimal.
+    examples:
+      bad: ['User::create($request->all());', '$order->update(request()->all());']
+      good: ['User::create($request->validated());', '$order->update($request->only([''note'']));']
+
+  - id: php-guarded-empty
+    title: Model with no guarded attributes
+    languages: [php]
+    pattern: '\bprotected\s+\$guarded\s*=\s*\[\s*\]'
+    severity: low
+    confidence: medium
+    owasp: A08
+    cwe: CWE-915
+    message: $guarded = [] makes every column mass-assignable; any create/update/fill with request arrays can set sensitive columns.
+    fix: Declare $fillable with the fields users may set, or make sure every write passes an explicit field list.
+    examples:
+      bad: ['    protected $guarded = [];']
+      good: ['    protected $guarded = [''id'', ''role''];']
+
+  - id: php-unserialize
+    title: unserialize without allowed_classes
+    languages: [php]
+    pattern: '(?<![\w>:])unserialize\s*\((?![^;]*allowed_classes)'
+    severity: medium
+    confidence: low
+    owasp: A08
+    cwe: CWE-502
+    message: unserialize() instantiates any class named in the data; with attacker-influenced input this is object injection (often code execution through framework gadget chains).
+    fix: Use json_decode for data; if unserialize is unavoidable, pass ['allowed_classes' => false] (or a fixed list) and only on data the server wrote and signed.
+    examples:
+      bad: ['$state = unserialize($payload);']
+      good: ['$state = unserialize($payload, [''allowed_classes'' => false]);', '$state = json_decode($payload, true);']

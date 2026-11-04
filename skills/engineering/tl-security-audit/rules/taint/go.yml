@@ -1,0 +1,313 @@
+# Taint spec — Go: net/http, gin, echo, chi, gorilla/mux, fiber; database/sql, sqlx, pgx, gorm.
+# Sources use typed metavariables so that e.g. db.Query results are NOT treated as request input.
+# Reserved metavariables: $SAFN $SAP $SARV $SATY $SARET $SABODY $SAE $SAO $SAX $SART
+language: go
+engine_languages: [go]
+inventory_languages: [go]
+example_ext: .go
+function_scopes:
+  - |
+    func $SAFN(..., $SAP $SATY, ...) { ... }
+  - |
+    func ($SARV $SART) $SAFN(..., $SAP $SATY, ...) { ... }
+sources:
+  - patterns:
+      - pattern: '($C : *gin.Context).$M(...)'
+      - metavariable-regex: {metavariable: $M, regex: '^(Param|Query|DefaultQuery|GetQuery|QueryArray|QueryMap|PostForm|DefaultPostForm|GetPostForm|PostFormArray|PostFormMap|GetHeader|Cookie|GetRawData|FormFile|MultipartForm)$'}
+  - patterns:
+      - pattern: '($C : echo.Context).$M(...)'
+      - metavariable-regex: {metavariable: $M, regex: '^(Param|QueryParam|QueryParams|QueryString|FormValue|FormParams|Cookie|FormFile|RealIP)$'}
+  - patterns:
+      - pattern: '($C : *fiber.Ctx).$M(...)'
+      - metavariable-regex: {metavariable: $M, regex: '^(Params|Query|Queries|FormValue|Body|BodyRaw|Get|Cookies|OriginalURL|Path)$'}
+  - patterns:
+      - pattern: '($R : *http.Request).$M(...)'
+      - metavariable-regex: {metavariable: $M, regex: '^(FormValue|PostFormValue|PathValue|Cookie|Cookies|FormFile|UserAgent|Referer)$'}
+  - pattern: '($R : *http.Request).URL.Query()'
+  - pattern: '($R : *http.Request).URL.RawQuery'
+  - pattern: '($R : *http.Request).URL.Path'
+  - pattern: '($R : *http.Request).Header'
+  - pattern: '($R : *http.Request).Body'
+  - pattern: '($R : *http.Request).Form'
+  - pattern: '($R : *http.Request).PostForm'
+  - pattern: chi.URLParam(...)
+  - pattern: mux.Vars(...)
+  - patterns:   # binding into a struct taints the struct
+      - pattern-either:
+          - pattern: '($C : *gin.Context).$M(&$X)'
+          - pattern: '($C : echo.Context).$M(&$X)'
+          - pattern: '($C : *fiber.Ctx).$M(&$X)'
+      - metavariable-regex: {metavariable: $M, regex: '^(ShouldBind\w*|Bind\w*|MustBind\w*|BodyParser|QueryParser|ParamsParser)$'}
+      - focus-metavariable: $X
+    by-side-effect: true
+  - patterns:
+      - pattern: json.NewDecoder($B).Decode(&$X)
+      - focus-metavariable: $X
+    by-side-effect: true
+sanitizers:
+  - pattern: strconv.Atoi(...)
+  - pattern: strconv.ParseInt(...)
+  - pattern: strconv.ParseUint(...)
+  - pattern: strconv.ParseFloat(...)
+  - pattern: strconv.ParseBool(...)
+  - pattern: uuid.Parse(...)
+  - pattern: uuid.MustParse(...)
+sinks:
+  sql-injection:
+    title: Untrusted input reaches a SQL query
+    owasp: A05
+    cwe: CWE-89
+    severity: high
+    message: Request data flows into SQL text instead of a bound argument.
+    fix: Use placeholders ($1 / ?) with arguments; for GORM use Where("col = ?", v); allow-list ORDER BY columns.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: $DB.$M($Q, ...)
+                  - metavariable-regex: {metavariable: $M, regex: '^(Query|QueryRow|Exec|Prepare|Queryx|QueryRowx|MustExec|NamedExec|NamedQuery|Raw|Where|Order|Group|Having|Joins)$'}
+                  - pattern-not: '($C : *gin.Context).$F(...)'
+                  - pattern-not: '($C : echo.Context).$F(...)'
+                  - pattern-not: '($C : *fiber.Ctx).$F(...)'
+                  - pattern-not: '($R : *http.Request).$F(...)'
+                  - pattern-not: '($U : url.Values).$F(...)'
+                  - pattern-not: '($H : http.Header).$F(...)'
+                  - pattern-not: http.$F(...)
+              - patterns:   # sqlx: Get/Select(dest, query, args...)
+                  - pattern: $DB.$M($DEST, $Q, ...)
+                  - metavariable-regex: {metavariable: $M, regex: '^(Get|Select)$'}
+                  - pattern-not: http.$F(...)
+                  - pattern-not: '($C : *fiber.Ctx).$F(...)'
+              - patterns:
+                  - pattern: $DB.$M($CTX, $Q, ...)
+                  - metavariable-regex: {metavariable: $M, regex: '^(QueryContext|QueryRowContext|ExecContext|PrepareContext|GetContext|SelectContext|QueryxContext|NamedExecContext)$'}
+              - patterns:   # pgx: Query(ctx, sql, args...)
+                  - pattern: $DB.$M($CTX, $Q, ...)
+                  - metavariable-regex: {metavariable: $M, regex: '^(Query|QueryRow|Exec)$'}
+                  - metavariable-regex: {metavariable: $CTX, regex: '^(ctx|c|context\..*|.*\.Context\(\))$'}
+          - focus-metavariable: $Q
+    examples:
+      bad: |
+        package h
+        func Get(c *gin.Context, db *sql.DB) {
+        	name := c.Query("name")
+        	db.Query(fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", name))
+        }
+      good:
+        - |
+          package h
+          func Get(c *gin.Context, db *sql.DB) {
+          	name := c.Query("name")
+          	db.Query("SELECT * FROM users WHERE name = $1", name)
+          }
+        - |
+          package h
+          func Fetch(c *gin.Context) {
+          	resp, _ := http.Get(c.Query("url"))
+          	_ = resp
+          }
+  command-injection:
+    title: Untrusted input reaches an OS command
+    owasp: A05
+    cwe: CWE-78
+    severity: critical
+    message: Request data selects the program or reaches a shell (sh -c) command line.
+    fix: Invoke a fixed binary with an argument slice; never pass input through sh -c; validate arguments.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: exec.Command($X, ...)
+              - pattern: exec.CommandContext($CTX, $X, ...)
+              - pattern: exec.Command($SH, "-c", $X, ...)
+              - pattern: exec.CommandContext($CTX, $SH, "-c", $X, ...)
+              - pattern: syscall.Exec($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        package h
+        func Ping(c *gin.Context) {
+        	exec.Command("sh", "-c", "ping -c 1 "+c.Query("host")).Run()
+        }
+      good: |
+        package h
+        func Ping(c *gin.Context) {
+        	exec.Command("ping", "-c", "1", "example.com").Run()
+        }
+  path-traversal:
+    title: Untrusted input used as a file path
+    owasp: A01
+    cwe: CWE-22
+    severity: high
+    message: Request data flows into a filesystem path.
+    fix: Use filepath.Base / filepath.IsLocal or os.Root (Go 1.24+) and verify the path stays inside the base directory.
+    sanitizers:
+      - pattern: filepath.Base(...)
+      - pattern: path.Base(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: os.$F($X, ...)
+                  - metavariable-regex: {metavariable: $F, regex: '^(Open|OpenFile|ReadFile|WriteFile|Create|Remove|RemoveAll|ReadDir|Mkdir|MkdirAll|Rename|Stat)$'}
+              - pattern: ioutil.ReadFile($X)
+              - pattern: ioutil.WriteFile($X, ...)
+              - pattern: http.ServeFile($W, $R, $X)
+              - pattern: '($C : *gin.Context).File($X)'
+              - pattern: '($C : *gin.Context).FileAttachment($X, ...)'
+              - pattern: '($C : echo.Context).File($X)'
+              - pattern: '($C : echo.Context).Attachment($X, ...)'
+              - pattern: '($C : *fiber.Ctx).SendFile($X, ...)'
+              - pattern: '($C : *fiber.Ctx).Download($X, ...)'
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        package h
+        func Dl(c *gin.Context) {
+        	c.File(filepath.Join("/srv/files", c.Param("name")))
+        }
+      good: |
+        package h
+        func Dl(c *gin.Context) {
+        	c.File(filepath.Join("/srv/files", filepath.Base(c.Param("name"))))
+        }
+  ssrf:
+    title: Untrusted input controls an outbound request URL
+    owasp: A01
+    cwe: CWE-918
+    severity: high
+    message: Request data flows into the URL of a server-side HTTP request.
+    fix: Allow-list hosts; block private/loopback/link-local addresses in a custom Dialer Control and on redirects.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: http.Get($X)
+              - pattern: http.Head($X)
+              - pattern: http.Post($X, ...)
+              - pattern: http.PostForm($X, ...)
+              - pattern: http.NewRequest($M, $X, ...)
+              - pattern: http.NewRequestWithContext($CTX, $M, $X, ...)
+              - pattern: '($CL : *http.Client).Get($X)'
+              - pattern: '($CL : *http.Client).Post($X, ...)'
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        package h
+        func Fetch(w http.ResponseWriter, r *http.Request) {
+        	resp, _ := http.Get(r.URL.Query().Get("url"))
+        	_ = resp
+        }
+      good: |
+        package h
+        func Fetch(w http.ResponseWriter, r *http.Request) {
+        	resp, _ := http.Get("https://api.example.com/health")
+        	_ = resp
+        }
+  open-redirect:
+    title: Untrusted input controls a redirect target
+    owasp: A01
+    cwe: CWE-601
+    severity: medium
+    message: Request data decides where the user is redirected.
+    fix: Redirect only to relative paths or allow-listed hosts.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: http.Redirect($W, $R, $X, ...)
+              - pattern: '($C : *gin.Context).Redirect($CODE, $X)'
+              - pattern: '($C : echo.Context).Redirect($CODE, $X)'
+              - pattern: '($C : *fiber.Ctx).Redirect($X, ...)'
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        package h
+        func Login(c *gin.Context) {
+        	c.Redirect(302, c.Query("next"))
+        }
+      good: |
+        package h
+        func Login(c *gin.Context) {
+        	c.Redirect(302, "/home")
+        }
+  xss:
+    title: Untrusted input marked as trusted HTML
+    owasp: A05
+    cwe: CWE-79
+    severity: medium
+    message: Request data is converted to template.HTML/JS/URL (escaping disabled) or written raw into an HTML response.
+    fix: Pass plain strings to html/template; sanitize with bluemonday before converting user HTML.
+    sanitizers:
+      - pattern: html.EscapeString(...)
+      - pattern: template.HTMLEscapeString(...)
+      - pattern: $P.Sanitize(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: template.HTML($X)
+              - pattern: template.JS($X)
+              - pattern: template.URL($X)
+              - pattern: template.HTMLAttr($X)
+              - pattern: fmt.Fprintf($W, $X, ...)
+              - pattern: io.WriteString($W, $X)
+              - pattern: '($C : *gin.Context).Data($CODE, "text/html", $X)'
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        package h
+        func Show(c *gin.Context) {
+        	data := template.HTML(c.Query("bio"))
+        	_ = data
+        }
+      good: |
+        package h
+        func Show(c *gin.Context) {
+        	data := template.HTML(template.HTMLEscapeString(c.Query("bio")))
+        	_ = data
+        }
+  template-injection:
+    title: Untrusted input parsed as a template
+    owasp: A05
+    cwe: CWE-1336
+    severity: high
+    message: Request data is used as template source.
+    fix: Parse templates only from trusted files/constants; pass user data as template data.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: template.New($N).Parse($X)
+              - pattern: '($T : *template.Template).Parse($X)'
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        package h
+        func T(c *gin.Context) {
+        	t, _ := template.New("x").Parse("Hi " + c.Query("n"))
+        	_ = t
+        }
+      good: |
+        package h
+        func T(c *gin.Context) {
+        	t, _ := template.New("x").Parse("Hi {{.}}")
+        	_ = t
+        }
+crossfile_example:
+  expect: sql-injection
+  files:
+    handler/accounts.go: |
+      package handler
+      func (h *Handler) Search(c *gin.Context) {
+      	term := c.Query("q")
+      	res, _ := h.svc.SearchAccounts(c.Request.Context(), term)
+      	c.JSON(200, res)
+      }
+    service/accounts.go: |
+      package service
+      func (s *Service) SearchAccounts(ctx context.Context, q string) ([]Account, error) {
+      	return s.repo.FindByName(ctx, q)
+      }
+    repo/accounts.go: |
+      package repo
+      func (r *Repo) FindByName(ctx context.Context, name string) ([]Account, error) {
+      	rows, err := r.db.QueryContext(ctx, "SELECT * FROM accounts WHERE name = '"+name+"'")
+      	_ = rows
+      	return nil, err
+      }

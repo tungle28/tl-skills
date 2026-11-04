@@ -1,0 +1,272 @@
+# Infrastructure, container, CI/CD and application configuration.
+rules:
+  # ------------------------------------------------------------------ Docker
+  - id: docker-latest-tag
+    title: Base image not pinned (latest / no tag)
+    languages: [dockerfile]
+    pattern: '^\s*FROM\s+(?:--platform=\S+\s+)?(?!scratch\b)[\w./\-]+(?::latest)?(?:\s+AS\s+\w+)?\s*$'
+    ignore_case: true
+    pattern_not: '@sha256:|:[\w.\-]*\d[\w.\-]*(?:\s|$)'
+    severity: low
+    confidence: high
+    owasp: A03
+    cwe: CWE-1357
+    message: Unpinned base images change underneath you; builds are not reproducible and can pull a compromised image.
+    fix: Pin a version tag, ideally with a digest (image:1.2.3@sha256:...), and update it deliberately (Dependabot/Renovate).
+    examples:
+      bad: ['FROM node:latest', 'FROM ubuntu']
+      good: ['FROM node:20.11-alpine', 'FROM mcr.microsoft.com/dotnet/aspnet:8.0@sha256:abc', 'FROM scratch']
+
+  - id: docker-runs-as-root
+    title: Container runs as root (no USER instruction)
+    languages: [dockerfile]
+    path_pattern: '(?i)dockerfile'
+    file_excludes: '(?im)^\s*USER\s+(?!root\b|0\b)\S+'
+    severity: medium
+    confidence: medium
+    owasp: A02
+    cwe: CWE-250
+    message: Without a USER instruction the process runs as root; a code-execution bug becomes root in the container and eases escape.
+    fix: Create/use an unprivileged user (e.g. `USER app` / `USER 10001`; many official images ship one, like node or the .NET `app` user).
+    examples:
+      file: Dockerfile
+      bad: ["FROM node:20\nCMD [\"node\",\"a.js\"]"]
+      good: ["FROM node:20\nUSER node\nCMD [\"node\",\"a.js\"]"]
+
+  - id: docker-secret-in-env
+    title: Secret baked into image via ENV/ARG
+    languages: [dockerfile]
+    pattern: '^\s*(?:ENV|ARG)\s+\w*(?:PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|ACCESS_KEY)\w*[\s=]+\S+'
+    ignore_case: true
+    severity: high
+    confidence: medium
+    owasp: A04
+    cwe: CWE-538
+    message: ENV/ARG values persist in image layers and `docker history`, visible to anyone who can pull the image.
+    fix: Use BuildKit secrets (RUN --mount=type=secret) at build time and inject runtime secrets from the orchestrator.
+    examples:
+      bad: ['ENV DB_PASSWORD=supersecret', 'ARG NPM_TOKEN=abc123']
+      good: ['ENV ASPNETCORE_URLS=http://+:8080']
+
+  - id: docker-add-remote
+    title: ADD from remote URL
+    languages: [dockerfile]
+    pattern: '^\s*ADD\s+(?:--\S+\s+)*https?://'
+    ignore_case: true
+    severity: low
+    confidence: high
+    owasp: A08
+    cwe: CWE-494
+    message: Remote ADD downloads content without integrity verification.
+    fix: Use curl/wget with a checksum verification step, or ADD --checksum=sha256:... (BuildKit).
+    examples:
+      bad: ['ADD https://example.com/tool.tar.gz /opt/']
+      good: ['COPY tool.tar.gz /opt/']
+
+  - id: docker-curl-pipe-shell
+    title: Remote script piped to a shell
+    languages: [dockerfile, shell, yaml]
+    pattern: '\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b'
+    severity: medium
+    confidence: high
+    owasp: A08
+    cwe: CWE-494
+    message: Executing a downloaded script without verification trusts the remote host and the network path.
+    fix: Download, verify checksum/signature, then execute; or install from a package manager.
+    examples:
+      bad: ['RUN curl -fsSL https://get.example.sh | bash']
+      good: ['RUN curl -fsSLo i.sh https://x/i.sh && echo "$SHA  i.sh" | sha256sum -c && sh i.sh']
+
+  # ------------------------------------------------------------------ Kubernetes / compose
+  - id: k8s-privileged
+    title: Privileged container / privilege escalation allowed
+    languages: [yaml]
+    pattern: '^\s*(?:privileged|allowPrivilegeEscalation)\s*:\s*true\b'
+    severity: high
+    confidence: high
+    owasp: A02
+    cwe: CWE-250
+    message: Privileged containers (or ones allowed to escalate) can take over the node.
+    fix: Set privileged false, allowPrivilegeEscalation false, drop ALL capabilities, runAsNonRoot true.
+    examples:
+      bad: ['        privileged: true', '  allowPrivilegeEscalation: true']
+      good: ['  allowPrivilegeEscalation: false']
+
+  - id: k8s-host-namespaces
+    title: Host network / PID / IPC or hostPath mount
+    languages: [yaml]
+    pattern: '^\s*(?:hostNetwork|hostPID|hostIPC)\s*:\s*true\b|^\s*hostPath\s*:|/var/run/docker\.sock'
+    severity: high
+    confidence: medium
+    owasp: A02
+    cwe: CWE-668
+    message: Host namespaces, hostPath or the Docker socket break container isolation.
+    fix: Remove unless this is a vetted node agent; use volumes/CSI and a restricted PodSecurity level.
+    examples:
+      bad: ['  hostNetwork: true', '      - /var/run/docker.sock:/var/run/docker.sock']
+      good: ['  hostNetwork: false']
+
+  - id: k8s-run-as-root
+    title: Pod/container explicitly runs as root
+    languages: [yaml]
+    pattern: '^\s*runAsUser\s*:\s*0\b|^\s*runAsNonRoot\s*:\s*false\b'
+    severity: medium
+    confidence: high
+    owasp: A02
+    cwe: CWE-250
+    message: Running as UID 0 increases impact of any compromise.
+    fix: runAsNonRoot true with a non-zero runAsUser.
+    examples:
+      bad: ['  runAsUser: 0']
+      good: ['  runAsUser: 10001']
+
+  # ------------------------------------------------------------------ GitHub Actions / Azure Pipelines
+  - id: gha-script-injection
+    title: Untrusted event data interpolated into a run script
+    languages: [yaml]
+    paths: {include: [".github/workflows/*", "*/.github/workflows/*"]}
+    pattern: '\$\{\{\s*github\.(?:event\.(?:issue\.(?:title|body)|pull_request\.(?:title|body|head\.ref|head\.label)|comment\.body|review\.body|review_comment\.body|discussion\.(?:title|body)|head_commit\.message|commits\[?\S*\]?\.message|pages\[?\S*\]?\.page_name)|head_ref)\s*\}\}'
+    severity: high
+    confidence: medium
+    owasp: A08
+    cwe: CWE-94
+    message: Anyone who can open an issue/PR controls these values; interpolated into `run:` they execute as shell in the workflow (with its token and secrets).
+    fix: 'Pass the value through an env var (env: TITLE: ${{ github.event.issue.title }}) and reference "$TITLE" in the script.'
+    examples:
+      file: .github/workflows/triage.yml
+      bad: ['      run: echo "${{ github.event.issue.title }}"']
+      good: ['      run: echo "$TITLE"']
+
+  - id: gha-pull-request-target
+    title: pull_request_target trigger
+    type: gate
+    languages: [yaml]
+    paths: {include: [".github/workflows/*", "*/.github/workflows/*"]}
+    pattern: '\bpull_request_target\b'
+    owasp: A08
+    cwe: CWE-829
+    question: Does this workflow check out or execute code from the PR head (actions/checkout with ref of the PR, npm install, build scripts)? With pull_request_target that code runs with write token and secrets.
+    examples:
+      file: .github/workflows/pr.yml
+      bad: ['on: pull_request_target']
+
+  - id: gha-unpinned-action
+    title: Third-party action pinned by tag, not commit SHA
+    languages: [yaml]
+    paths: {include: [".github/workflows/*", "*/.github/workflows/*", "*action.yml"]}
+    pattern: '^\s*-?\s*uses\s*:\s*(?!actions/|github/|\./|docker://)[\w.\-]+/[\w.\-/]+@(?![0-9a-f]{40}\b)\S+'
+    severity: low
+    confidence: high
+    owasp: A03
+    cwe: CWE-829
+    message: Tags are mutable; a compromised action repository can move the tag and run code in your pipeline with its secrets.
+    fix: Pin third-party actions to a full commit SHA (keep the version in a comment) and let Dependabot update them.
+    examples:
+      file: .github/workflows/ci.yml
+      bad: ['      - uses: some-org/deploy-action@v2']
+      good: ['      - uses: actions/checkout@v4', '      - uses: some-org/deploy-action@0123456789abcdef0123456789abcdef01234567 # v2']
+
+  - id: gha-write-all-permissions
+    title: Workflow token with write-all permissions
+    languages: [yaml]
+    paths: {include: [".github/workflows/*", "*/.github/workflows/*"]}
+    pattern: '^\s*permissions\s*:\s*write-all\b'
+    severity: medium
+    confidence: high
+    owasp: A02
+    cwe: CWE-250
+    message: Every step (including third-party actions) gets a token that can push code, create releases and change settings.
+    fix: 'Default to `permissions: contents: read` and grant specific write scopes per job.'
+    examples:
+      file: .github/workflows/ci.yml
+      bad: ['permissions: write-all']
+      good: ['permissions:']
+
+  - id: ci-secret-echo
+    title: Secret printed in CI logs
+    languages: [yaml]
+    pattern: '(?:echo|Write-Host|print)\s+[^\n]*\$\{\{\s*secrets\.|(?:echo|Write-Host)\s+[^\n]*\$\((?:\w*(?:PASSWORD|SECRET|TOKEN|KEY)\w*)\)'
+    ignore_case: true
+    severity: medium
+    confidence: medium
+    owasp: A09
+    cwe: CWE-532
+    message: Masking is best-effort (breaks on transformed values); printing secrets risks exposing them in build logs.
+    fix: Never echo secrets; pass them to tools via env vars or files.
+    examples:
+      bad: ['      run: echo ${{ secrets.DEPLOY_TOKEN }}', '  - script: echo $(DB_PASSWORD)']
+      good: ['      run: ./deploy.sh']
+
+  # ------------------------------------------------------------------ Terraform / cloud
+  - id: tf-open-ingress
+    title: Ingress open to the internet
+    type: gate
+    languages: [terraform]
+    pattern: '0\.0\.0\.0/0|::/0'
+    owasp: A02
+    cwe: CWE-284
+    question: Is this rule for a public entry point (443 on a load balancer) or does it expose management/database ports (22, 3389, 1433, 5432, 3306, 6379, 9200, 27017) to the internet?
+    examples:
+      bad: ['    cidr_blocks = ["0.0.0.0/0"]']
+
+  - id: tf-public-storage
+    title: Publicly readable storage
+    languages: [terraform]
+    pattern: 'acl\s*=\s*"public-read(?:-write)?"|block_public_acls\s*=\s*false|allow_nested_items_to_be_public\s*=\s*true|public_network_access_enabled\s*=\s*true'
+    severity: high
+    confidence: medium
+    owasp: A02
+    cwe: CWE-732
+    message: Storage made public is a leading cause of bulk data exposure.
+    fix: Keep buckets/containers private; serve public assets through a CDN with origin access control.
+    examples:
+      bad: ['  acl    = "public-read"']
+      good: ['  acl    = "private"']
+
+  - id: tf-encryption-disabled
+    title: Encryption at rest disabled
+    languages: [terraform]
+    pattern: '\b(?:encrypted|storage_encrypted|enable_encryption|encryption_enabled)\s*=\s*false'
+    severity: medium
+    confidence: high
+    owasp: A04
+    cwe: CWE-311
+    message: Data at rest is stored unencrypted.
+    fix: Enable encryption (KMS / customer-managed keys for regulated data).
+    examples:
+      bad: ['  storage_encrypted = false']
+      good: ['  storage_encrypted = true']
+
+  # ------------------------------------------------------------------ app configuration
+  - id: cfg-debug-logging-prod
+    title: Verbose/debug logging in production config
+    languages: [json, yaml]
+    paths: {include: ["*appsettings.Production.json", "*appsettings.json", "*application-prod*.y*ml", "*values-prod*.y*ml"]}
+    pattern: '"Default"\s*:\s*"(?:Debug|Trace)"|^\s*level\s*:\s*(?:debug|trace)\b'
+    ignore_case: true
+    severity: low
+    confidence: medium
+    owasp: A09
+    cwe: CWE-532
+    message: Debug/trace logging in production tends to record request bodies, tokens and personal data.
+    fix: Use Information/Warning in production; enable debug temporarily and scoped.
+    examples:
+      file: appsettings.Production.json
+      bad: ['      "Default": "Debug",']
+      good: ['      "Default": "Information",']
+
+  - id: cfg-detailed-errors
+    title: Detailed errors enabled in configuration
+    languages: [json, xml]
+    pattern: '"DetailedErrors"\s*:\s*true|<customErrors\s+mode\s*=\s*"Off"|"IncludeExceptionDetails"\s*:\s*true'
+    ignore_case: true
+    paths: {exclude: ["*appsettings.Development.json"]}
+    severity: medium
+    confidence: medium
+    owasp: A10
+    cwe: CWE-209
+    message: Exception details are shown to clients.
+    fix: Enable only in Development configuration.
+    examples:
+      bad: ['  "DetailedErrors": true,']
+      good: ['  "DetailedErrors": false,']

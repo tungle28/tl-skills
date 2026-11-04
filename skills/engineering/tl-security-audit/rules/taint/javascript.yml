@@ -1,0 +1,364 @@
+# Taint spec — JavaScript / TypeScript: Express, Fastify, NestJS, Nuxt/Nitro (h3), Next.js, browser DOM.
+# Reserved metavariables: $SAFN $SAP $SARV $SATY $SARET $SABODY $SAE $SAO $SAX $SART
+language: javascript
+engine_languages: [javascript, typescript]
+inventory_languages: [javascript, typescript]
+example_ext: .ts
+function_scopes:
+  - |
+    function $SAFN(..., $SAP, ...) { ... }
+  - |
+    async function $SAFN(..., $SAP, ...) { ... }
+  - |
+    $SAFN(..., $SAP, ...) { ... }
+  - |
+    const $SAFN = (..., $SAP, ...) => $SABODY
+  - |
+    const $SAFN = async (..., $SAP, ...) => $SABODY
+  - |
+    const $SAFN = function (..., $SAP, ...) { ... }
+sources:
+  - patterns:   # Express / Fastify / Koa style request objects
+      - pattern: $REQ.$A
+      - metavariable-regex: {metavariable: $REQ, regex: '^(req|request|ctx\.request)$'}
+      - metavariable-regex: {metavariable: $A, regex: '^(query|body|params|headers|cookies|files|file|hostname|originalUrl|url|path)$'}
+  - patterns:
+      - pattern: $REQ.$M(...)
+      - metavariable-regex: {metavariable: $REQ, regex: '^(req|request)$'}
+      - metavariable-regex: {metavariable: $M, regex: '^(json|formData|text|get|header|param)$'}
+  - patterns:   # NestJS decorated handler parameters
+      - pattern-inside: |
+          class $C { ... $M(..., @$D(...) $P, ...) { ... } ... }
+      - metavariable-regex: {metavariable: $D, regex: '^(Param|Query|Body|Headers|Req|Request|UploadedFile|UploadedFiles|Ip|HostParam)$'}
+      - pattern: $P
+  - patterns:   # Nuxt / Nitro / h3
+      - pattern: $F(...)
+      - metavariable-regex: {metavariable: $F, regex: '^(getQuery|getRouterParam|getRouterParams|readBody|readRawBody|readFormData|readMultipartFormData|getCookie|getHeader|getRequestHeader|getRequestHeaders|getHeaders|readValidatedBody|getValidatedQuery|getValidatedRouterParams|getRequestURL)$'}
+  - pattern: $U.searchParams.get(...)
+  - pattern: $U.searchParams
+  - pattern: useSearchParams().get(...)
+  - pattern: location.hash
+  - pattern: location.search
+  - pattern: location.href
+  - pattern: window.location.hash
+  - pattern: window.location.search
+  - pattern: document.location.hash
+  - pattern: document.URL
+  - pattern: document.referrer
+  - pattern: window.name
+  - patterns:   # postMessage payloads
+      - pattern-inside: |
+          window.addEventListener('message', ($E) => { ... })
+      - pattern: $E.data
+sanitizers:
+  - pattern: parseInt(...)
+  - pattern: parseFloat(...)
+  - pattern: Number(...)
+  - pattern: Boolean(...)
+  - pattern: Number.parseInt(...)
+  - patterns:  # lookup in a constant allow-list map (SORTABLE[key]): only the map's own values come out
+      - pattern: $ALLOW[$KEY]
+      - metavariable-regex: {metavariable: $ALLOW, regex: '^[A-Z][A-Z0-9_]+$'}
+sinks:
+  sql-injection:
+    title: Untrusted input reaches a SQL query
+    owasp: A05
+    cwe: CWE-89
+    severity: high
+    message: Request data flows into SQL text (not a bound parameter).
+    fix: Use placeholders with a values array, the query builder, or Prisma's tagged $queryRaw.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query($Q, ...)
+              - pattern: $DB.execute($Q, ...)
+              - pattern: $DB.raw($Q, ...)
+              - pattern: $DB.$queryRawUnsafe($Q, ...)
+              - pattern: $DB.$executeRawUnsafe($Q, ...)
+              - pattern: $DB.unsafe($Q, ...)
+              - pattern: $QB.whereRaw($Q, ...)
+              - pattern: $QB.orderByRaw($Q, ...)
+              - pattern: $S.literal($Q)
+          - focus-metavariable: $Q
+    examples:
+      bad: |
+        router.get("/u", async (req, res) => {
+          const rows = await pool.query(`SELECT * FROM users WHERE name = '${req.query.name}'`);
+          res.json(rows);
+        });
+      good:
+        - |
+          router.get("/u", async (req, res) => {
+            const rows = await pool.query("SELECT * FROM users WHERE name = $1", [req.query.name]);
+            res.json(rows);
+          });
+        - |
+          const SORTABLE = { date: "created_at", amount: "amount" };
+          router.get("/t", async (req, res) => {
+            const column = SORTABLE[req.query.sort] || "created_at";
+            const rows = await pool.query(`SELECT * FROM t ORDER BY ${column}`);
+            res.json(rows);
+          });
+  nosql-injection:
+    title: Untrusted input used as a MongoDB filter
+    owasp: A05
+    cwe: CWE-943
+    severity: medium
+    message: 'Request data is used as (part of) a query filter; objects like {"$ne": null} change the query''s meaning.'
+    fix: Cast fields to primitives (String(x)), enable sanitizeFilter / strictQuery, never use $where with input.
+    sanitizers:
+      - pattern: String(...)
+      - pattern: mongoSanitize(...)
+    sinks:
+      - patterns:
+          - pattern: $M.$F($Q, ...)
+          - metavariable-regex: {metavariable: $F, regex: '^(find|findOne|findOneAndUpdate|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|countDocuments|aggregate|where)$'}
+          - metavariable-regex: {metavariable: $M, regex: '^([A-Z]\w*|.*(Model|Collection|collection|\.collection\(.*\)))$'}
+          - focus-metavariable: $Q
+    examples:
+      bad: |
+        app.post("/login", async (req, res) => {
+          const u = await User.findOne({ email: req.body.email, password: req.body.password });
+        });
+      good:
+        - |
+          app.post("/login", async (req, res) => {
+            const u = await User.findOne({ email: String(req.body.email) });
+          });
+        - |
+          class C { find(@Param("id") id: string) { return this.svc.find(id); } }
+  command-injection:
+    title: Untrusted input reaches a shell command
+    owasp: A05
+    cwe: CWE-78
+    severity: critical
+    message: Request data flows into a command executed through a shell.
+    fix: Use execFile/spawn with an argument array and shell:false; validate arguments.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: exec($X, ...)
+              - pattern: execSync($X, ...)
+              - pattern: $CP.exec($X, ...)
+              - pattern: $CP.execSync($X, ...)
+              - pattern: 'spawn($X, ..., {..., shell: true, ...})'
+              - pattern: execa.command($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        import { exec } from "child_process";
+        app.get("/ping", (req, res) => { exec("ping -c 1 " + req.query.host); });
+      good: |
+        import { execFile } from "child_process";
+        app.get("/ping", (req, res) => { execFile("ping", ["-c", "1", String(req.query.host)]); });
+  code-injection:
+    title: Untrusted input evaluated as code
+    owasp: A05
+    cwe: CWE-95
+    severity: critical
+    message: Request data flows into eval / Function / vm.
+    fix: Remove dynamic evaluation; use JSON.parse or an explicit parser.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($X)
+              - pattern: new Function(..., $X)
+              - pattern: vm.runInNewContext($X, ...)
+              - pattern: vm.runInThisContext($X, ...)
+              - pattern: vm.runInContext($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        app.get("/calc", (req, res) => res.send(String(eval(req.query.expr))));
+      good: |
+        app.get("/calc", (req, res) => res.json(JSON.parse(String(req.query.expr))));
+  path-traversal:
+    title: Untrusted input used as a file path
+    owasp: A01
+    cwe: CWE-22
+    severity: high
+    message: Request data flows into a filesystem path.
+    fix: Reduce to path.basename and check the resolved path stays within the base directory.
+    sanitizers:
+      - pattern: path.basename(...)
+      - pattern: basename(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: fs.$F($X, ...)
+                  - metavariable-regex: {metavariable: $F, regex: '^(readFile|readFileSync|createReadStream|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rm|rmSync|readdir|readdirSync|createWriteStream|stat|access)$'}
+              - patterns:
+                  - pattern: $FSP.$F($X, ...)
+                  - metavariable-regex: {metavariable: $FSP, regex: '^(fsp|fsPromises|promises)$'}
+                  - metavariable-regex: {metavariable: $F, regex: '^(readFile|writeFile|unlink|rm|readdir)$'}
+              - pattern: $RES.sendFile($X, ...)
+              - pattern: $RES.download($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        app.get("/f", (req, res) => res.sendFile("/srv/files/" + req.query.name));
+      good: |
+        app.get("/f", (req, res) => res.sendFile("/srv/files/" + path.basename(String(req.query.name))));
+  ssrf:
+    title: Untrusted input controls a server-side request URL
+    owasp: A01
+    cwe: CWE-918
+    severity: high
+    message: Request data flows into the URL of an outbound HTTP request.
+    fix: Allow-list hosts; block internal/metadata addresses after DNS resolution; keep caller input to path/query values on a fixed base URL.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fetch($X, ...)
+              - pattern: $fetch($X, ...)
+              - pattern: ofetch($X, ...)
+              - pattern: axios($X, ...)
+              - pattern: axios.$M($X, ...)
+              - pattern: got($X, ...)
+              - pattern: got.$M($X, ...)
+              - pattern: http.get($X, ...)
+              - pattern: https.get($X, ...)
+              - pattern: http.request($X, ...)
+              - pattern: https.request($X, ...)
+              - pattern: needle.$M($X, ...)
+              - pattern: proxyRequest($E, $X, ...)
+              - pattern: sendProxy($E, $X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        export default defineEventHandler(async (event) => {
+          const { url } = getQuery(event);
+          return await $fetch(url as string);
+        });
+      good: |
+        export default defineEventHandler(async (event) => {
+          const { id } = getQuery(event);
+          return await $fetch("/v1/items", { baseURL: "https://api.example.com", query: { id } });
+        });
+  open-redirect:
+    title: Untrusted input controls a redirect target
+    owasp: A01
+    cwe: CWE-601
+    severity: medium
+    message: Request data decides where the browser is sent.
+    fix: Redirect only to relative paths or allow-listed hosts.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $RES.redirect($X)
+              - pattern: $RES.redirect($S, $X)
+              - pattern: sendRedirect($E, $X, ...)
+              - pattern: 'navigateTo($X, {..., external: true, ...})'
+              - pattern: redirect($X)
+              - pattern: location.href = $X
+              - pattern: window.location.href = $X
+              - pattern: window.location = $X
+              - pattern: location.assign($X)
+              - pattern: location.replace($X)
+              - pattern: window.open($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        app.get("/go", (req, res) => res.redirect(req.query.next));
+      good: |
+        app.get("/go", (req, res) => res.redirect("/home"));
+  xss:
+    title: Untrusted input rendered as HTML
+    owasp: A05
+    cwe: CWE-79
+    severity: medium
+    message: Untrusted data reaches an HTML sink (DOM, React, or a server HTML response).
+    fix: Render as text; sanitize with DOMPurify (allow-list) right before HTML insertion.
+    example_ext: .tsx
+    sanitizers:
+      - pattern: DOMPurify.sanitize(...)
+      - pattern: sanitizeHtml(...)
+      - pattern: escapeHtml(...)
+      - pattern: validator.escape(...)
+      - pattern: encodeURIComponent(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $EL.innerHTML = $X
+              - pattern: $EL.outerHTML = $X
+              - pattern: document.write($X)
+              - pattern: document.writeln($X)
+              - pattern: $EL.insertAdjacentHTML($P, $X)
+              - pattern: '<$EL dangerouslySetInnerHTML={{__html: $X}} />'
+              - pattern: $RES.send($X)
+              - pattern: $RES.write($X)
+              - pattern: $RES.end($X)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        export const Search = () => {
+          const q = new URLSearchParams(location.search).get("q");
+          return <div dangerouslySetInnerHTML={{ __html: q }} />;
+        };
+      good: |
+        export const Search = () => {
+          const q = new URLSearchParams(location.search).get("q");
+          return <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(q) }} />;
+        };
+  template-injection:
+    title: Untrusted input compiled as a template
+    owasp: A05
+    cwe: CWE-1336
+    severity: critical
+    message: Request data is used as template source (server-side template injection).
+    fix: Pass user data as template variables, never as the template itself.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: ejs.render($X, ...)
+              - pattern: pug.render($X, ...)
+              - pattern: pug.compile($X, ...)
+              - pattern: Handlebars.compile($X, ...)
+              - pattern: nunjucks.renderString($X, ...)
+              - pattern: _.template($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        app.get("/t", (req, res) => res.send(ejs.render("Hello " + req.query.name)));
+      good: |
+        app.get("/t", (req, res) => res.send(ejs.render("Hello <%= name %>", { name: req.query.name })));
+  unsafe-deserialization:
+    title: Untrusted input deserialized unsafely
+    owasp: A08
+    cwe: CWE-502
+    severity: critical
+    message: Request data reaches a deserializer that can execute code.
+    fix: Use JSON.parse with schema validation.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: serialize.unserialize($X, ...)
+              - pattern: unserialize($X, ...)
+              - pattern: 'yaml.load($X, {..., schema: yaml.DEFAULT_FULL_SCHEMA, ...})'
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        app.post("/s", (req, res) => { const o = serialize.unserialize(req.body.data); });
+      good: |
+        app.post("/s", (req, res) => { const o = JSON.parse(req.body.data); });
+crossfile_example:
+  expect: sql-injection
+  files:
+    users.controller.ts: |
+      import { UsersRepo } from "./users.repo";
+      @Controller("users")
+      export class UsersController {
+        constructor(private readonly repo: UsersRepo) {}
+        @Get()
+        search(@Query("name") name: string) {
+          return this.repo.findByName(name, 20);
+        }
+      }
+    users.repo.ts: |
+      export class UsersRepo {
+        constructor(private readonly db: Pool) {}
+        async findByName(term: string, limit: number) {
+          return this.db.query(`SELECT * FROM users WHERE name LIKE '%${term}%' LIMIT ${limit}`);
+        }
+      }

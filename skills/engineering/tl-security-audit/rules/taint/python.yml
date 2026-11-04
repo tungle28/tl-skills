@@ -1,0 +1,276 @@
+# Taint spec — Python (Flask, Django, FastAPI/Starlette).
+# Reserved metavariables (do not use in sources/sinks): $SAFN $SAP $SARV $SATY $SARET $SABODY $SAE $SAO $SAX
+language: python
+engine_languages: [python]
+inventory_languages: [python]
+example_ext: .py
+function_scopes:
+  - |
+    def $SAFN(..., $SAP, ...):
+      ...
+  - |
+    async def $SAFN(..., $SAP, ...):
+      ...
+sources:
+  - patterns:
+      - pattern: request.$A
+      - metavariable-regex: {metavariable: $A, regex: '^(args|form|values|json|data|files|cookies|headers|GET|POST|body|META|query_params|path_params|FILES|COOKIES|stream)$'}
+  - pattern: request.get_json(...)
+  - pattern: await request.json()
+  - pattern: await request.form()
+  - pattern: await request.body()
+  - patterns:   # FastAPI / Flask route handler parameters
+      - pattern-either:
+          - pattern-inside: |
+              @$APP.$VERB(...)
+              def $F(..., $P, ...):
+                ...
+          - pattern-inside: |
+              @$APP.$VERB(...)
+              async def $F(..., $P, ...):
+                ...
+      - metavariable-regex: {metavariable: $VERB, regex: '^(get|post|put|delete|patch|route|api_route|websocket)$'}
+      - pattern: $P
+sanitizers:
+  - pattern: int(...)
+  - pattern: float(...)
+  - pattern: bool(...)
+  - pattern: uuid.UUID(...)
+  - pattern: UUID(...)
+sinks:
+  sql-injection:
+    title: Untrusted input reaches a SQL query
+    owasp: A05
+    cwe: CWE-89
+    severity: high
+    message: Request data flows into SQL text without parameterization.
+    fix: Pass values as query parameters (cursor.execute(sql, params), SQLAlchemy bound parameters); allow-list identifiers.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $C.execute($Q, ...)
+              - pattern: $C.executemany($Q, ...)
+              - pattern: $C.executescript($Q)
+              - pattern: $M.objects.raw($Q, ...)
+              - pattern: $M.objects.extra(..., where=$Q, ...)
+              - pattern: text($Q)
+              - pattern: sqlalchemy.text($Q)
+              - pattern: pandas.read_sql($Q, ...)
+              - pattern: pd.read_sql($Q, ...)
+          - focus-metavariable: $Q
+    examples:
+      bad: |
+        @app.route("/u")
+        def u():
+            name = request.args.get("name")
+            cur.execute("SELECT * FROM users WHERE name = '%s'" % name)
+      good: |
+        @app.route("/u")
+        def u():
+            name = request.args.get("name")
+            cur.execute("SELECT * FROM users WHERE name = %s", (name,))
+  command-injection:
+    title: Untrusted input reaches an OS command
+    owasp: A05
+    cwe: CWE-78
+    severity: critical
+    message: Request data flows into a shell command.
+    fix: Use subprocess with an argument list and shell=False; validate arguments against an allow-list.
+    sanitizers:
+      - pattern: shlex.quote(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.system($X)
+              - pattern: os.popen($X, ...)
+              - pattern: subprocess.$F($X, ..., shell=True, ...)
+              - pattern: commands.getoutput($X)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        @app.post("/ping")
+        def ping(host: str):
+            os.system("ping -c 1 " + host)
+      good: |
+        @app.post("/ping")
+        def ping(host: str):
+            subprocess.run(["ping", "-c", "1", host])
+  code-injection:
+    title: Untrusted input is evaluated as code
+    owasp: A05
+    cwe: CWE-95
+    severity: critical
+    message: Request data flows into eval/exec.
+    fix: Remove dynamic evaluation; use ast.literal_eval or an explicit parser.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($X, ...)
+              - pattern: exec($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def calc():
+            return eval(request.args["expr"])
+      good: |
+        def calc():
+            return ast.literal_eval(request.args["expr"])
+  path-traversal:
+    title: Untrusted input used as a file path
+    owasp: A01
+    cwe: CWE-22
+    severity: high
+    message: Request data flows into a filesystem path.
+    fix: Reduce to a basename (secure_filename / os.path.basename) and verify the resolved path stays inside the base directory.
+    sanitizers:
+      - pattern: os.path.basename(...)
+      - pattern: secure_filename(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: open($X, ...)
+              - pattern: send_file($X, ...)
+              - pattern: FileResponse($X, ...)
+              - pattern: os.remove($X)
+              - pattern: os.unlink($X)
+              - pattern: shutil.rmtree($X, ...)
+              - pattern: shutil.copy($X, ...)
+              - pattern: shutil.move($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def dl():
+            return send_file("/data/" + request.args["f"])
+      good: |
+        def dl():
+            return send_file("/data/" + secure_filename(request.args["f"]))
+  ssrf:
+    title: Untrusted input controls an outbound request URL
+    owasp: A01
+    cwe: CWE-918
+    severity: high
+    message: Request data flows into the URL of a server-side HTTP request.
+    fix: Allow-list hosts; block private/loopback/link-local addresses after DNS resolution and on redirects.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: requests.$M($X, ...)
+              - pattern: httpx.$M($X, ...)
+              - pattern: urllib.request.urlopen($X, ...)
+              - pattern: urlopen($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def fetch():
+            return requests.get(request.args["url"]).text
+      good: |
+        def fetch():
+            return requests.get("https://api.example.com/x", params={"q": request.args["q"]}).text
+  open-redirect:
+    title: Untrusted input controls a redirect target
+    owasp: A01
+    cwe: CWE-601
+    severity: medium
+    message: Request data decides where the user is redirected.
+    fix: Only redirect to relative paths or allow-listed hosts (url_has_allowed_host_and_scheme in Django).
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: redirect($X, ...)
+              - pattern: HttpResponseRedirect($X)
+              - pattern: RedirectResponse($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def login():
+            return redirect(request.args.get("next"))
+      good: |
+        def login():
+            return redirect(url_for("home"))
+  unsafe-deserialization:
+    title: Untrusted input is deserialized unsafely
+    owasp: A08
+    cwe: CWE-502
+    severity: critical
+    message: Request data reaches pickle/marshal/unsafe YAML loading.
+    fix: Use JSON or yaml.safe_load; never unpickle untrusted data.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: pickle.loads($X)
+              - pattern: pickle.load($X)
+              - pattern: marshal.loads($X)
+              - pattern: dill.loads($X)
+              - patterns:
+                  - pattern: yaml.load($X, ...)
+                  - pattern-not: yaml.load($X, Loader=yaml.SafeLoader)
+                  - pattern-not: yaml.load($X, Loader=SafeLoader)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def up():
+            obj = pickle.loads(request.data)
+      good: |
+        def up():
+            obj = json.loads(request.data)
+  template-injection:
+    title: Untrusted input used as a template
+    owasp: A05
+    cwe: CWE-1336
+    severity: critical
+    message: Request data is compiled as a Jinja2/Flask template (server-side template injection).
+    fix: Pass user data as template variables, never as the template source.
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: render_template_string($X, ...)
+              - pattern: jinja2.Template($X, ...)
+              - pattern: Template($X, ...)
+              - pattern: $ENV.from_string($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def hello():
+            return render_template_string("Hi " + request.args["n"])
+      good: |
+        def hello():
+            return render_template_string("Hi {{ n }}", n=request.args["n"])
+  xss:
+    title: Untrusted input rendered as HTML without escaping
+    owasp: A05
+    cwe: CWE-79
+    severity: medium
+    message: Request data reaches an HTML response or is marked safe.
+    fix: Render through auto-escaping templates; sanitize with an allow-list (nh3/bleach) before marking safe.
+    sanitizers:
+      - pattern: escape(...)
+      - pattern: html.escape(...)
+      - pattern: bleach.clean(...)
+      - pattern: nh3.clean(...)
+    sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Markup($X)
+              - pattern: mark_safe($X)
+              - pattern: HttpResponse($X, ...)
+              - pattern: HTMLResponse($X, ...)
+          - focus-metavariable: $X
+    examples:
+      bad: |
+        def v(request):
+            return HttpResponse("<p>" + request.GET["q"] + "</p>")
+      good: |
+        def v(request):
+            return HttpResponse("<p>" + escape(request.GET["q"]) + "</p>")
+crossfile_example:
+  expect: sql-injection
+  files:
+    app.py: |
+      from repo import find_user
+      @app.get("/users")
+      def users(name: str):
+          return find_user(db, name)
+    repo.py: |
+      def find_user(conn, username):
+          sql = "SELECT * FROM users WHERE name = '" + username + "'"
+          return conn.execute(sql)
