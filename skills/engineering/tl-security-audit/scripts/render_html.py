@@ -276,7 +276,7 @@ UI_TEXT = {
         "f_files": "Files", "f_commit": "Commit", "partial": "Partly fixed", "failed": "Fix attempt failed",
         "details": "Finding details", "fix_results": "Fix results",
         "fix_line": "{fixed} fixed · {partial} partly fixed · {failed} not fixed · last update {at}",
-        "c_id": "ID", "c_sev": "Severity", "c_title": "Issue", "c_loc": "Location",
+        "c_id": "ID", "c_sev": "Severity", "c_title": "Issue", "c_loc": "Location", "c_status": "Status",
     },
     "vi": {
         "report": "Báo cáo", "findings": "Finding", "theme": "Đổi sáng/tối",
@@ -294,7 +294,7 @@ UI_TEXT = {
         "f_files": "File", "f_commit": "Commit", "partial": "Sửa một phần", "failed": "Sửa chưa được",
         "details": "Chi tiết finding", "fix_results": "Kết quả sửa",
         "fix_line": "{fixed} đã sửa · {partial} sửa một phần · {failed} chưa sửa được · cập nhật lần cuối {at}",
-        "c_id": "ID", "c_sev": "Mức", "c_title": "Vấn đề", "c_loc": "Vị trí",
+        "c_id": "ID", "c_sev": "Mức", "c_title": "Vấn đề", "c_loc": "Vị trí", "c_status": "Trạng thái",
     },
 }
 
@@ -457,13 +457,14 @@ def fix_results(rows, fixes, T, inline):
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 # report.md's "…and N more (see findings.json)" line after a truncated list: not part of the last block
+STATUS_ICON = {"fixed": "✅", "partial": "🟡", "failed": "❌"}
 MORE_RE = re.compile(r"^_?(?:…|\.\.\.)\s*and \d+ more\b")
 
 
 def compact_findings(report_md, rows, T):
     """Report tab text: each run of per-finding detail blocks in report.md (a ### to ###### heading that
     names a finding ID, down to the next heading of the same or a higher level) becomes one short table —
-    ID (links to the card), severity, issue, location. The details live on the Findings tab; report.md
+    ID (links to the card), severity, issue, location, fix status (from fixes.json). The details live on the Findings tab; report.md
     itself is not changed. IDs a table of the same section already lists are not listed again."""
     by_id = {r["id"]: r for r in rows}
     if not by_id:
@@ -476,16 +477,21 @@ def compact_findings(report_md, rows, T):
     def cell(s):
         return re.sub(r"\s+", " ", str(s or "")).strip().replace("|", "\\|")
 
+    def status(r):  # recorded by record_fix.py; a finding nobody has fixed yet shows a dash
+        st = (r.get("fix") or {}).get("status")
+        return f"{STATUS_ICON[st]} {cell(T.get(st, st))}" if st in STATUS_ICON else "—"
+
     def flush():
         ids = [x for x in dict.fromkeys(run) if x not in listed]
         run.clear()
         if not ids:
             return
-        out.extend(["", f"| {T['c_id']} | {T['c_sev']} | {T['c_title']} | {T['c_loc']} |", "|---|---|---|---|"])
+        out.extend(["", f"| {T['c_id']} | {T['c_sev']} | {T['c_title']} | {T['c_loc']} | {T['c_status']} |",
+                    "|---|---|---|---|---|"])
         for x in ids:
             r = by_id[x]
             out.append(f"| [{cell(x)}](#f-{x}) | {cell(r.get('sev'))} | {cell(r.get('title'))} | "
-                       + (f"`{cell(r['loc'])}`" if r.get("loc") else "") + " |")
+                       + (f"`{cell(r['loc'])}`" if r.get("loc") else "") + f" | {status(r)} |")
         out.append("")
 
     while i < len(lines):

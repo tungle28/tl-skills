@@ -220,7 +220,7 @@ starting `duplicate of <id>`, so it is never learned as a false positive.
 3. **HTML version (option):** `python3 $S/scripts/render_html.py --run-dir $RUN_DIR` writes an
    offline `report.html` (report + one filterable card per finding with Fix / Skip / Later and a
    note, and a "Copy for agent" button on the Findings tab; the Report tab lists findings as a short
-   table linking to their cards; secrets masked like `report.md`). A pasted decision block
+   table (with each one's fix status) linking to their cards; secrets masked like `report.md`). A pasted decision block
    from that button names the run: treat its Fix list as the user's selection for `fix` mode, and
    Skip items with a note as triage proposals (Phase 7), still confirmed before writing `triage.yml`.
    Build it when the user asks for HTML or an easier-to-review report; otherwise end the chat

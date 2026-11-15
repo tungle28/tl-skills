@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="vi" data-pref="auto" data-tpl="arch">
 <head>
-<meta name="source-sha256" content="70baadcb632e24543adc6ba580b28fabfb0191f8539ca78fa51a32be5d11a773">
+<meta name="source-sha256" content="6cad5c1931081a8cad3ea5697bca65b4c94d51008d0a8a979f927485f0052da4">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tl-code-review — How It Works</title>
@@ -406,7 +406,7 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 </table></div>
 <p><strong>Chat summary</strong> (bằng ngôn ngữ của người dùng): verdict + tóm tắt, blocker/major kèm <code>file:line</code> và cách sửa, số lượng phần còn lại, requirement coverage và trạng thái CI, coverage caveats, và bước tiếp theo (sửa, review lại, post lên PR, chạy tl-security-audit / tl-code-refactor).</p>
 <p><strong>Kiểm tra đã chạy</strong> (ngay sau Tóm tắt trong <code>report.md</code>): resolve_scope, từng lệnh static (eslint/tsc/… kèm pass/fail), reviewer (shard + lượt cross-cutting/lens, số file đã đọc), verifier, blast radius, PR context; rồi một dòng <strong>Bỏ qua</strong>: file bị loại gộp theo thư mục gốc kèm số lượng, file vượt <code>--max-files</code>, shard rủi ro thấp bị hoãn. Ghi chú bỏ qua của từng shard vẫn nằm ở mục Độ phủ &amp; giới hạn.</p>
-<p><strong>HTML (tuỳ chọn, chỉ khi chạy harness)</strong>: <code>scripts/render_html.py --dir $RUN --lang vi</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report (finding rút gọn thành bảng ID / mức / vấn đề / vị trí, bấm ID mở card) và tab Findings (nút &quot;Sao chép cho agent&quot; chỉ hiện ở tab này): mỗi finding một card (evidence, vì sao quan trọng, cách sửa) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/category/verification/bucket/quyết định, tìm kiếm. Nút &quot;Sao chép cho agent&quot; chép danh sách quyết định kèm đường dẫn run để dán lại cho agent sửa. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng. Review inline cho snippet hay diff nhỏ không có report nên không có HTML; với PR, comment trên PR vẫn là đầu ra chính.</p>
+<p><strong>HTML (tuỳ chọn, chỉ khi chạy harness)</strong>: <code>scripts/render_html.py --dir $RUN --lang vi</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report (finding rút gọn thành bảng ID / mức / vấn đề / vị trí / trạng thái sửa, bấm ID mở card) và tab Findings (nút &quot;Sao chép cho agent&quot; chỉ hiện ở tab này): mỗi finding một card (evidence, vì sao quan trọng, cách sửa) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/category/verification/bucket/quyết định, tìm kiếm. Nút &quot;Sao chép cho agent&quot; chép danh sách quyết định kèm đường dẫn run để dán lại cho agent sửa. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng. Review inline cho snippet hay diff nhỏ không có report nên không có HTML; với PR, comment trên PR vẫn là đầu ra chính.</p>
 <p><strong>Sau khi sửa</strong>: khi agent sửa finding của một lần chạy (vd. từ khối &quot;Sao chép cho agent&quot;), mỗi finding được ghi bằng <code>scripts/record_fix.py $RUN/fixes.json --id … --status fixed|partial|failed --what … --verify …</code>, rồi dựng lại <code>report.html</code>: finding đã sửa chuyển sang mục &quot;Đã sửa&quot; kèm việc đã làm, cách xác minh, file và commit.</p>
 </section>
 <section class="sec">

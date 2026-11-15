@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="vi" data-pref="auto" data-tpl="arch">
 <head>
-<meta name="source-sha256" content="9c23e46504ccfb0220feee776970056ccdf2f8451019c86d5a77479f4215b8f4">
+<meta name="source-sha256" content="9dce79bbc1aa6503e6bce44d908243ed059221309696f7a98f442fdc91f08895">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tl-security-audit — How It Works</title>
@@ -421,7 +421,7 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 <li><strong>Bảng trong report</strong>: theo quy ước cột cố định ở <code>references/report-tables.md</code>; <code>run finish</code> chuẩn hoá mọi bảng (kể cả bảng agent viết trong <a href="http://surface.md">surface.md</a>) và in <code>WARNING: table repaired</code> nếu phải sửa, nên <code>report.md</code> chuyển sang HTML (tl-md-to-html, <code>render_html.py</code>) không cần chỉnh tay.</li>
 <li><strong>Keep report private</strong>: <code>report.md</code> ở ngoài repo và PR.</li>
 <li><strong>Checks run</strong> (ngay sau Executive summary): mỗi bước đã chạy một dòng kèm <strong>ran / skipped / failed</strong> và kết quả (inventory, pattern rules, semgrep, taint, osv-scanner/npm audit/…, reviewer, verifier), rồi một dòng <strong>Skipped</strong> gồm các thư mục bị loại thực sự có trong repo (vd. <code>**/node_modules (12)</code>), glob <code>--exclude</code>, vendored, test, migration, lockfile, file lớn/minified, file ngoài scope, shard bị hoãn. Inventory ghi các thư mục này vào <code>inventory.json</code> → <code>excluded</code>.</li>
-<li><strong>HTML (tuỳ chọn)</strong>: <code>scripts/render_html.py --run-dir $RUN_DIR</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report (finding rút gọn thành bảng ID / mức / vấn đề / vị trí, bấm ID mở card) và tab Findings (nút &quot;Sao chép cho agent&quot; chỉ hiện ở tab này): mỗi finding một card (evidence, attack scenario, fix) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/OWASP/status/quyết định, và theo new/persisting khi có run trước; tìm kiếm. Nút &quot;Sao chép cho agent&quot; chép danh sách quyết định kèm đường dẫn run; dán lại cho agent thì mục Sửa là danh sách finding chọn cho mode <code>fix</code>. Secret được che như <code>report.md</code>; trang chạy offline. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng cuối tóm tắt.</li>
+<li><strong>HTML (tuỳ chọn)</strong>: <code>scripts/render_html.py --run-dir $RUN_DIR</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report (finding rút gọn thành bảng ID / mức / vấn đề / vị trí / trạng thái sửa, bấm ID mở card) và tab Findings (nút &quot;Sao chép cho agent&quot; chỉ hiện ở tab này): mỗi finding một card (evidence, attack scenario, fix) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/OWASP/status/quyết định, và theo new/persisting khi có run trước; tìm kiếm. Nút &quot;Sao chép cho agent&quot; chép danh sách quyết định kèm đường dẫn run; dán lại cho agent thì mục Sửa là danh sách finding chọn cho mode <code>fix</code>. Secret được che như <code>report.md</code>; trang chạy offline. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng cuối tóm tắt.</li>
 </ul>
 </section>
 <section class="sec">
