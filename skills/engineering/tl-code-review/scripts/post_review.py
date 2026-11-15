@@ -83,11 +83,12 @@ def main():
     ap.add_argument("--include-unverified", action="store_true",
                     help="also post blocker/major findings the verifier could not confirm")
     ap.add_argument("--event", choices=["COMMENT", "REQUEST_CHANGES"], default="COMMENT")
-    ap.add_argument("--lang", choices=["en", "vi"], default="en")
+    ap.add_argument("--lang", default="en", help="BCP-47 tag; en and vi supported, others fall back to en")
     ap.add_argument("--format", choices=["github", "markdown"], default="github")
     ap.add_argument("--confirm", action="store_true", help="actually post (otherwise dry run)")
     ap.add_argument("--allow-stale", action="store_true")
     a = ap.parse_args()
+    a.lang = run_dir.norm_lang(a.lang, "post_review")
     a.dir = a.dir or str(run_dir.latest())
     d = Path(a.dir)
 

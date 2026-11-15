@@ -274,19 +274,52 @@ def audit_go(root, files):
     if not exe:
         return {"tool": "govulncheck", "status": "skipped", "reason": "govulncheck not installed"}, []
     code, out, err = run([exe, "-json", "./..."], root)
-    vulns = []
-    for chunk in re.split(r"\n(?=\{)", out or ""):
-        try:
-            o = json.loads(chunk)
-        except ValueError:
-            continue
-        f = o.get("finding")
-        if f and f.get("trace"):
-            vulns.append({"package": f["trace"][0].get("module"), "version": f["trace"][0].get("version"),
-                          "ecosystem": "go", "advisory": f.get("osv"), "summary": "reachable (call path found)",
-                          "severity": "high", "manifest": "go.mod", "tool": "govulncheck"})
+    vulns = parse_govulncheck(out)
     return {"tool": "govulncheck", "status": "ran" if out else "failed",
             "results": len(vulns), **({} if out else {"reason": err[:200]})}, vulns
+
+
+# govulncheck JSON protocol (golang.org/x/vuln/internal/govulncheck): a symbol-level scan emits a
+# `finding` per module, per imported package and per call stack. trace[0] is the vulnerable frame:
+# only a set `function` means the symbol is called; `package` alone means imported, not called;
+# neither means the module is only required. Keep the strongest level per (module, osv).
+GO_LEVELS = {  # level -> (rank, severity, summary)
+    "symbol": (3, "high", "reachable (call path found)"),
+    "package": (2, "medium", "imported, not called"),
+    "module": (1, "low", "required module, vulnerable package not imported"),
+}
+
+
+def parse_govulncheck(out):
+    dec, pos, best = json.JSONDecoder(), 0, {}
+    text = out or ""
+    while True:
+        m = re.compile(r"\S").search(text, pos)
+        if not m:
+            break
+        try:
+            o, pos = dec.raw_decode(text, m.start())
+        except ValueError:
+            nxt = text.find("\n{", m.start() + 1)
+            if nxt < 0:
+                break
+            pos = nxt + 1
+            continue
+        f = o.get("finding") if isinstance(o, dict) else None
+        if not f or not f.get("trace"):
+            continue
+        top = f["trace"][0] or {}
+        level = "symbol" if top.get("function") else "package" if top.get("package") else "module"
+        key = (top.get("module"), f.get("osv"))
+        if key not in best or GO_LEVELS[level][0] > GO_LEVELS[best[key][0]][0]:
+            best[key] = (level, top, f)
+    vulns = []
+    for (module, osv), (level, top, f) in best.items():
+        _, sev, summary = GO_LEVELS[level]
+        vulns.append({"package": module, "version": top.get("version"), "ecosystem": "go",
+                      "advisory": osv, "summary": summary, "severity": sev, "reachability": level,
+                      "fixed_in": f.get("fixed_version"), "manifest": "go.mod", "tool": "govulncheck"})
+    return vulns
 
 
 def main():

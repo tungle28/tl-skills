@@ -9,7 +9,7 @@
 5. Team coding standards
 6. Posting the review back (Phase 6)
 
-Phase 1d gathers context that lives outside the repo. Every source follows the
+Phase 1 (step 4) gathers context that lives outside the repo. Every source follows the
 same ladder: **connector → CLI → skip and record the gap in coverage**. Never
 block the review on a missing source, and never guess its content.
 

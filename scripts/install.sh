@@ -3,7 +3,7 @@
 #
 #   sh scripts/install.sh                                   # all skills -> Claude Code (~/.claude)
 #   sh scripts/install.sh --target cursor
-#   sh scripts/install.sh --target all --skills tl-code-refactor,tl-seo-audit --dry-run
+#   sh scripts/install.sh --target all --skills tl-code-review,tl-security-audit --dry-run
 #   sh scripts/install.sh --target claude --scope project --project ../my-app
 #
 # Without a clone (downloads the release archive to a temp dir, installs, deletes it):

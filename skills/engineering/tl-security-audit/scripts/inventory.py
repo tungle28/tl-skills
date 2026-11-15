@@ -95,17 +95,37 @@ def count_loc(path, lang):
     return len(lines)
 
 
-def walk(root, extra_excludes):
+def walk(root, extra_excludes, skipped=None):
+    """Yield (path, rel). `skipped`, if given, collects what was left out for the report:
+    {"dirs": set of excluded folder paths found, "glob_files": count of files matched by --exclude}."""
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS
-                       and f"{rel_dir}/{d}".lstrip("./") not in EXCLUDE_DIRS]
+        keep = []
+        for d in dirnames:
+            if d in EXCLUDE_DIRS or f"{rel_dir}/{d}".lstrip("./") in EXCLUDE_DIRS:
+                if skipped is not None and d != ".git":
+                    skipped["dirs"].add(d if rel_dir == "." else f"{rel_dir}/{d}")
+            else:
+                keep.append(d)
+        dirnames[:] = keep
         for fn in filenames:
             p = Path(dirpath) / fn
             rel = p.relative_to(root).as_posix()
             if any(fnmatch.fnmatch(rel, g) for g in extra_excludes):
+                if skipped is not None:
+                    skipped["glob_files"] += 1
                 continue
             yield p, rel
+
+
+def collapse_dirs(paths, limit=40):
+    """Excluded folder paths for the report: one entry per name when a name repeats
+    (`node_modules` x12 -> `**/node_modules (12)`), capped at `limit` entries."""
+    by_name = defaultdict(list)
+    for p in paths:
+        by_name[p.rsplit("/", 1)[-1]].append(p)
+    out = [v[0] if len(v) == 1 else f"**/{k} ({len(v)})" for k, v in sorted(by_name.items())]
+    return out[:limit] + ([f"… +{len(out) - limit}"] if len(out) > limit else [])
 
 
 def dep_names(root, lockfiles, files):
@@ -198,7 +218,8 @@ def main():
         diff_refs, changed = git_changed_ranges(root, a.diff)
 
     files, lockfiles, skipped, unknown, vendor_roots = [], [], 0, 0, set()
-    for p, rel in walk(root, a.exclude):
+    left_out = {"dirs": set(), "glob_files": 0}
+    for p, rel in walk(root, a.exclude, left_out):
         if p.name.lower() in LOCKFILES:
             lockfiles.append(rel)
             continue
@@ -254,6 +275,9 @@ def main():
                    "skipped_large_or_minified": skipped, "unrecognized_files": unknown},
         # taint skips these (rules and secrets still scan them); review skips them unless --include-vendor
         "vendor_roots": sorted(vendor_roots), "include_vendor": a.include_vendor, "exclude_globs": a.exclude,
+        # what the report lists under "Skipped": excluded folders actually present, --exclude hits, flags
+        "excluded": {"dirs": collapse_dirs(left_out["dirs"]), "glob_files": left_out["glob_files"],
+                     "include_tests": a.include_tests, "include_migrations": a.include_migrations},
         "languages": dict(langs), "files": files, "max_shards": a.max_shards,
     }
     write_json(Path(a.run_dir) / "inventory.json", inv)

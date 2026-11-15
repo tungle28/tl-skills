@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="vi" data-pref="auto" data-tpl="arch">
 <head>
-<meta name="source-sha256" content="187ea3365feab4e9175655d30843cb37cf79cecdb834ba2a32acb464436d7a95">
+<meta name="source-sha256" content="c9588e23f84678022c175fff832321b15916a3c847ac0662e028ddf8e93755c6">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tl-code-review — How It Works</title>
@@ -241,7 +241,7 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 </section>
 <section class="sec">
 <h2 id="5-phase-1--context">5. Phase 1 — Context<a class="anchor" href="#5-phase-1--context" title="Permanent link">#</a></h2>
-<p>Bốn nguồn chạy song song, độc lập nhau:</p>
+<p>Bốn nguồn chạy song song; riêng <code>fetch_pr_context.py</code> (nguồn ngữ cảnh ngoài) nên bắt đầu không muộn hơn static checks, để static checks bỏ qua phần CI đã chạy:</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -405,7 +405,9 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 </tbody>
 </table></div>
 <p><strong>Chat summary</strong> (bằng ngôn ngữ của người dùng): verdict + tóm tắt, blocker/major kèm <code>file:line</code> và cách sửa, số lượng phần còn lại, requirement coverage và trạng thái CI, coverage caveats, và bước tiếp theo (sửa, review lại, post lên PR, chạy tl-security-audit / tl-code-refactor).</p>
-<p><strong>HTML (tuỳ chọn, chỉ khi chạy harness)</strong>: <code>scripts/render_html.py --dir $RUN --lang vi</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report và tab Findings (bảng lọc theo severity/category/verification/bucket, tìm kiếm, mở rộng từng dòng để xem evidence và cách sửa). Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng. Review inline cho snippet hay diff nhỏ không có report nên không có HTML; với PR, comment trên PR vẫn là đầu ra chính.</p>
+<p><strong>Kiểm tra đã chạy</strong> (ngay sau Tóm tắt trong <code>report.md</code>): resolve_scope, từng lệnh static (eslint/tsc/… kèm pass/fail), reviewer (shard + lượt cross-cutting/lens, số file đã đọc), verifier, blast radius, PR context; rồi một dòng <strong>Bỏ qua</strong>: file bị loại gộp theo thư mục gốc kèm số lượng, file vượt <code>--max-files</code>, shard rủi ro thấp bị hoãn. Ghi chú bỏ qua của từng shard vẫn nằm ở mục Độ phủ &amp; giới hạn.</p>
+<p><strong>HTML (tuỳ chọn, chỉ khi chạy harness)</strong>: <code>scripts/render_html.py --dir $RUN --lang vi</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report và tab Findings: mỗi finding một card (evidence, vì sao quan trọng, cách sửa) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/category/verification/bucket/quyết định, tìm kiếm. Nút &quot;Sao chép cho agent&quot; chép danh sách quyết định kèm đường dẫn run để dán lại cho agent sửa. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng. Review inline cho snippet hay diff nhỏ không có report nên không có HTML; với PR, comment trên PR vẫn là đầu ra chính.</p>
+<p><strong>Sau khi sửa</strong>: khi agent sửa finding của một lần chạy (vd. từ khối &quot;Sao chép cho agent&quot;), mỗi finding được ghi bằng <code>scripts/record_fix.py $RUN/fixes.json --id … --status fixed|partial|failed --what … --verify …</code>, rồi dựng lại <code>report.html</code>: finding đã sửa chuyển sang mục &quot;Đã sửa&quot; kèm việc đã làm, cách xác minh, file và commit.</p>
 </section>
 <section class="sec">
 <h2 id="10-phase-6--post-to-pr">10. Phase 6 — Post to PR<a class="anchor" href="#10-phase-6--post-to-pr" title="Permanent link">#</a></h2>

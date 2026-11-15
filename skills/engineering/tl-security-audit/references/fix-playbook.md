@@ -31,3 +31,10 @@
    unless the user asks.
 8. Write `<RUN_DIR>/fix/log.md` (run language): per finding — status, commit, test added, follow-ups
    (rotation, config changes in other repos, infra changes the code cannot make).
+9. **Record each outcome for the report** right after its commit (or revert), in the run language:
+   `python3 $S/scripts/record_fix.py <RUN_DIR>/fixes.json --id <finding id> --status fixed|partial|failed
+   --what "<what changed, or why not>" --verify "<command: result>" --files <a,b> [--commit <sha>]`.
+   `fixed` needs `--verify`; reverted means `failed` with the reason. Never put secret values in these
+   texts. When the batch is done, run `render_html.py --run-dir <RUN_DIR>` again: fixed findings move to
+   a "Fixed" section with what changed and how it was verified; partial/failed ones keep their card,
+   with the attempt shown on it.

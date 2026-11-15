@@ -1,0 +1,6 @@
+interface:
+  display_name: "Skill Eval"
+  short_description: "Evidence-backed scorecard and verdict for an Agent Skill"
+  default_prompt: "Use $tl-skill-eval to evaluate this skill and give me a scorecard with a verdict and prioritized fixes."
+policy:
+  allow_implicit_invocation: true

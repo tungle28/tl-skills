@@ -177,6 +177,18 @@ def trace_md(trace):
                       for t in trace)
 
 
+def dep_impact(vs):
+    """Impact line for a vulnerable package; govulncheck says how far the vulnerable code is reached."""
+    levels = {v.get("reachability") for v in vs}
+    if "symbol" in levels:
+        return "govulncheck found a call path from this application to the vulnerable symbol."
+    if "package" in levels:
+        return "govulncheck: the vulnerable package is imported but no vulnerable symbol is called."
+    if "module" in levels:
+        return "govulncheck: the module is required but the vulnerable package is not imported."
+    return "Depends on whether the vulnerable code path is reachable from this application."
+
+
 def from_hit(h, status):
     ev = f"`{h['snippet']}`" if h.get("snippet") else h.get("message", "")
     if h.get("trace"):
@@ -485,7 +497,7 @@ def cmd_merge(run):
                          "owasp": "A03", "cwe": "CWE-1395", "title": f"{pkg} {ver or ''} has {len(vs)} known advisories",
                          "file": vs[0].get("manifest") or "dependencies", "line_start": 1, "line_end": 1,
                          "evidence": adv, "attack_scenario": "; ".join(v.get("summary", "") for v in vs[:3] if v.get("summary")) or adv,
-                         "impact": "Depends on whether the vulnerable code path is reachable from this application.",
+                         "impact": dep_impact(vs),
                          "fix": "Upgrade to a fixed version" + (f" ({vs[0].get('fixed_in')})" if vs[0].get("fixed_in") else "")
                                 + "; if transitive, bump the direct parent or add an override/resolution.",
                          "severity": sev, "confidence": "high" if any(v["tool"] == "govulncheck" for v in vs) else "medium",
@@ -666,6 +678,60 @@ def detail(f):
     return head + "\n" + "\n".join(body) + "\n"
 
 
+def tool_line(tl):
+    """One 'Checks run' bullet for a scanner entry of scan/tools.json or deps.json."""
+    bits = []
+    for key, label in (("results", "results"), ("rules", "rules"), ("errors", "errors")):
+        if isinstance(tl.get(key), int) and (tl[key] or key != "errors"):
+            bits.append(f"{tl[key]} {label}")
+    if tl.get("engine"):
+        bits.append(f"engine {tl['engine']}" + (f" {tl['version']}" if tl.get("version") else ""))
+    if tl.get("languages"):
+        bits.append("languages " + ", ".join(tl["languages"]))
+    if tl.get("reason"):
+        bits.append(md_text(str(tl["reason"])))
+    return f"- `{tl.get('tool', '?')}` — **{tl.get('status', '?')}**" + (" — " + "; ".join(bits) if bits else "")
+
+
+def checks_run(tools, inv, doc, shards, n_ver, n_oos):
+    """'Checks Run' and 'Skipped': what this run executed and what it did not read, near the top of
+    the report so the reader sees the depth of the audit before its findings."""
+    t, ex, scope = inv.get("totals", {}), inv.get("excluded", {}), inv.get("scope", {})
+    cov = [c for c in doc.get("coverage", []) if c.get("shard")]
+    out = ["## Checks Run", "",
+           f"- `inventory.py` — **ran** — {t.get('files', '?')} files scanned, {t.get('reviewable_files', '?')} "
+           f"in review shards; languages {', '.join(sorted(inv.get('languages', {}))) or '-'}"]
+    out += [tool_line(tl) for tl in tools]
+    out.append(f"- Reviewer sub-agents — **{'ran' if cov else 'not run'}** — {len({c['shard'] for c in cov})}/"
+               f"{len(shards)} shards, {sum(c.get('files_reviewed') or 0 for c in cov)} files read")
+    out.append(f"- Verifier — **{'ran' if n_ver else 'not run'}** — {n_ver} verdicts")
+    skipped = [f"`{d}`" for d in ex.get("dirs", [])]
+    skipped += [f"`{g}`" for g in inv.get("exclude_globs", [])]
+    if ex.get("glob_files"):
+        skipped.append(f"{ex['glob_files']} files matched by --exclude")
+    if inv.get("vendor_roots") and not inv.get("include_vendor"):
+        skipped += [f"`{v}` (vendored: scanned, not reviewed)" for v in inv["vendor_roots"][:10]]
+    if t.get("test_files") and ex.get("include_tests") is False:
+        skipped.append(f"{t['test_files']} test files (scanned, not reviewed)")
+    mig = sum(1 for f in inv.get("files", []) if f.get("is_migration"))
+    if mig and ex.get("include_migrations") is False:
+        skipped.append(f"{mig} migration files (scanned, not reviewed)")
+    if inv.get("lockfiles"):
+        skipped.append(f"{len(inv['lockfiles'])} lockfiles (dependency audit only)")
+    if t.get("skipped_large_or_minified"):
+        skipped.append(f"{t['skipped_large_or_minified']} large or minified files")
+    if t.get("unrecognized_files"):
+        skipped.append(f"{t['unrecognized_files']} files with no supported language or generated")
+    if not scope.get("whole_repo", True):
+        skipped.append(f"{max(t.get('files', 0) - t.get('in_scope_files', 0), 0)} files outside the review scope"
+                       + (f" ({n_oos} scanner hits there, listed under Outside Review Scope)" if n_oos else ""))
+    if scope.get("deferred_shards"):
+        d = scope["deferred_shards"]
+        skipped.append(f"{len(d)} shards deferred by --max-shards ({sum(x['loc'] for x in d)} LOC)")
+    out += ["", "Skipped: " + (", ".join(skipped) if skipped else "nothing beyond the defaults") + ".", ""]
+    return out
+
+
 def cmd_report(run):
     doc = read_json(run / "merged.json")
     if not doc:
@@ -703,6 +769,7 @@ def cmd_report(run):
     if st.get("authorization"):
         L += ["", f"Authorization: {st['authorization']}"]
     L += ["", "## Executive Summary", "", narr.get("executive_summary", "_(orchestrator: write narrative.json → executive_summary)_"), ""]
+    L += checks_run(tools, inv, doc, shards, n_ver, len(oos))
 
     # Coverage first: a partial review must never read like a clean one.
     L += ["## Coverage Gaps", ""]

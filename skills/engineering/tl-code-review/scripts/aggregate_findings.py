@@ -21,7 +21,8 @@ Usage
   python aggregate_findings.py ... --baseline .code-review/baseline.json      # hide known findings
   python aggregate_findings.py ... --write-baseline                           # snapshot current findings
   python aggregate_findings.py ... --lang vi                                  # Vietnamese section headings
-Exit code: 0 approve/comment, 2 request changes (usable as a CI gate).
+                                  (any BCP-47 tag; vi-VN -> vi, unsupported languages -> en with a warning)
+Exit code: 0 approve/comment, 2 request changes (usable as a CI gate), 1 usage error.
 """
 import argparse
 import hashlib
@@ -44,6 +45,7 @@ L10N = {
         "minor": "Minor", "nits": "Nits", "needs_check": "Needs human confirmation (unverified / low confidence)",
         "preexisting": "Pre-existing issues (not introduced by this change)", "tooling": "Tooling signals",
         "blast": "Blast radius — call sites outside the diff", "coverage": "Coverage & limits",
+        "checks": "Checks run", "skipped": "Skipped", "skipped_none": "nothing beyond the defaults",
         "positives": "What looks good", "none": "None.",
         "reqs": "Requirement coverage", "ci": "CI status (from PR platform)",
         "raised": "already raised by a human reviewer",
@@ -56,6 +58,7 @@ L10N = {
         "minor": "Minor", "nits": "Nit", "needs_check": "Cần người xác nhận (chưa verify / độ tin cậy thấp)",
         "preexisting": "Vấn đề có sẵn (không do thay đổi này gây ra)", "tooling": "Tín hiệu từ tooling",
         "blast": "Blast radius — call site ngoài diff", "coverage": "Độ phủ & giới hạn",
+        "checks": "Kiểm tra đã chạy", "skipped": "Bỏ qua", "skipped_none": "không có gì ngoài mặc định",
         "positives": "Điểm tốt", "none": "Không có.",
         "reqs": "Độ phủ yêu cầu (ticket)", "ci": "Trạng thái CI (từ nền tảng PR)",
         "raised": "reviewer khác đã nêu",
@@ -63,6 +66,63 @@ L10N = {
         "v_assess": "📋 ĐÁNH GIÁ (không áp dụng verdict merge cho phạm vi không phải diff)",
     },
 }
+
+
+def group_paths(paths, limit=15):
+    """Excluded paths grouped by top-level folder for the report: ['`.pnpm-store/` (812)', '`a.lock`']."""
+    groups = {}
+    for p in paths:
+        head, sep, _ = p.partition("/")
+        key = head + sep
+        groups[key] = groups.get(key, 0) + 1
+    items = sorted(groups.items(), key=lambda kv: (-kv[1], kv[0]))
+    out = [f"`{k}`" + (f" ({n})" if n > 1 or k.endswith("/") else "") for k, n in items[:limit]]
+    if len(items) > limit:
+        out.append(f"… +{sum(n for _, n in items[limit:])} more excluded files")
+    return out
+
+
+def checks_run(T, manifest, plan, static, blast, prctx, reqs, coverage, verdicts):
+    """'Checks run' and 'Skipped' near the top of report.md: what this review executed (scope, static
+    tools, reviewers, verifier, blast radius, PR context) and what it did not read."""
+    s = manifest.get("stats", {})
+    out = [f"\n## {T['checks']}\n\n",
+           f"- `resolve_scope.py` — **ran** — mode `{manifest.get('mode', '?')}`, {s.get('files', '?')} files"
+           + (f", {s['total_lines_in_scope']} lines in scope" if s.get("total_lines_in_scope") else "") + "\n"]
+    for name, e in (static.get("checks") or {}).items():
+        st = ("not run" if not static.get("ran") else
+              "pass" if e.get("exit_code") == 0 else f"fail (exit {e.get('exit_code')})")
+        out.append(f"- `{e.get('cmd', name)}` — **{st}** — {name}\n")
+    if static and not static.get("checks"):
+        out.append("- Static tools — **not run**\n")
+    read = sum(len(c.get("reviewed") or []) for c in coverage)
+    planned = {x.get("id") for x in plan.get("shards") or [] if isinstance(x, dict)}
+    done = sum(1 for c in coverage if c.get("shard") in planned)
+    extra = len(coverage) - done  # cross-cutting and lens passes are not shards
+    out.append(f"- Reviewer sub-agents — **{'ran' if coverage else 'not run'}** — "
+               + (f"{done}/{len(planned)} shards" if planned else f"{len(coverage)} passes")
+               + (f" + {extra} cross-cutting/lens passes" if planned and extra > 0 else "")
+               + f", {read} files read" + (f" (depth {plan['depth']})" if plan.get("depth") else "") + "\n")
+    out.append(f"- Verifier — **{'ran' if verdicts else 'not run'}** — {len(verdicts)} verdicts\n")
+    if blast.get("symbols"):
+        syms = blast["symbols"]
+        out.append(f"- `blast_radius.py` — **ran** — {len(syms)} changed symbols, "
+                   f"{sum(x.get('ref_count') or 0 for x in syms)} references\n")
+    if manifest.get("pr"):
+        if prctx.get("available"):
+            out.append("- PR context — **ran**" + (f" — CI {prctx['ci_summary']}" if prctx.get("ci_summary") else "") + "\n")
+        else:
+            out.append(f"- PR context — **unavailable** — {prctx.get('reason', 'not fetched')}\n")
+    if reqs:
+        out.append(f"- Requirement check — **ran** — {len(reqs)} criteria\n")
+    skipped = group_paths(manifest.get("excluded") or [])
+    if manifest.get("truncated"):
+        skipped.append(f"{len(manifest['truncated'])} files beyond --max-files")
+    if plan.get("overflow"):
+        skipped.append(f"{len(plan['overflow'])} low-risk shards deferred: "
+                       + ", ".join(f"`{o['module']}`" for o in plan["overflow"][:6]))
+    out.append(f"\n{T['skipped']}: " + (", ".join(skipped) if skipped else T["skipped_none"]) + ".\n")
+    return out
 
 
 def load_json(p, default=None):
@@ -137,17 +197,27 @@ def validate(f):
     return missing
 
 
+class UsageErrorParser(argparse.ArgumentParser):
+    """argparse exits 2 on a bad argument, the same code as a 'request changes' verdict; exit 1 instead
+    so a CI gate cannot read a usage error as a review result."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
-    ap = argparse.ArgumentParser()
+    ap = UsageErrorParser()
     ap.add_argument("--dir", help="the run folder (default: the latest run)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--write-baseline", action="store_true")
-    ap.add_argument("--lang", choices=["en", "vi"], default="en")
+    ap.add_argument("--lang", default="en", help="BCP-47 tag; en and vi have headings, others fall back to en")
     ap.add_argument("--max-nits", type=int, default=10)
     a = ap.parse_args()
+    a.lang = run_dir.norm_lang(a.lang, "aggregate")
     a.dir = a.dir or str(run_dir.latest())
     d = Path(a.dir)
     T = L10N[a.lang]
@@ -302,6 +372,8 @@ def main():
         L.append("<details><summary>Change intent (commit messages)</summary>\n\n```\n"
                  + "\n".join(manifest["intent"][:30]) + "\n```\n</details>\n")
 
+    L += checks_run(T, manifest, plan, static, blast, prctx, reqs, coverage, verdicts)
+
     def render(title, items, full=True, limit=None):
         L.append(f"\n## {title}\n\n")
         if not items:
@@ -366,12 +438,6 @@ def main():
         for c in prctx["checks"][:20]:
             mark = {"pass": "✅", "fail": "❌", "pending": "⏳", "skipping": "⏭️"}.get(c.get("bucket"), "•")
             L.append(f"- {mark} {c.get('name')}" + (f" — {c['link']}" if c.get("link") else "") + "\n")
-
-    if static and static.get("checks"):
-        L.append(f"\n## {T['tooling']}\n")
-        for name, e in static["checks"].items():
-            st = "not run" if not static.get("ran") else ("✅ pass" if e.get("exit_code") == 0 else f"❌ exit {e.get('exit_code')}")
-            L.append(f"- **{name}**: {st} — `{e['cmd']}`\n")
 
     if positives:
         L.append(f"\n## {T['positives']}\n")

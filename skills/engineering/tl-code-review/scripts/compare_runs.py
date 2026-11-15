@@ -127,11 +127,12 @@ def main():
     ap.add_argument("--base", default=run_dir.BASE, help="the .code-review folder (default: .code-review)")
     ap.add_argument("--old", help="older run folder (default: the run before --new)")
     ap.add_argument("--new", help="newer run folder (default: the latest run)")
-    ap.add_argument("--lang", choices=["en", "vi"], default="en")
+    ap.add_argument("--lang", default="en", help="BCP-47 tag; en and vi supported, others fall back to en")
     ap.add_argument("--list", action="store_true", help="list the runs and exit")
     ap.add_argument("--prune", type=int, metavar="KEEP", help="delete all but the newest KEEP runs (dry run)")
     ap.add_argument("--confirm", action="store_true", help="with --prune: actually delete")
     a = ap.parse_args()
+    a.lang = run_dir.norm_lang(a.lang, "compare")
     T = L10N[a.lang]
 
     runs = run_dir.list_runs(a.base)

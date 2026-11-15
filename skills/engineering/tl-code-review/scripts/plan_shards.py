@@ -14,7 +14,7 @@ Budget model (rough, intentionally conservative):
 Usage
   python plan_shards.py --manifest $RUN/manifest.json --budget 60000 --out $RUN/shards.json
   python plan_shards.py ... --depth quick     # fewer lenses, skip nits
-  python plan_shards.py ... --depth deep      # all lenses on high-risk shards
+  python plan_shards.py ... --depth deep      # one extra specialist-lens pass on top-risk shards
 """
 import argparse
 import json
@@ -53,6 +53,11 @@ LENS_SIGNALS = {
         r"app\.(get|post|put|delete)|MapGet|MapPost|\[JsonProperty|JsonPropertyName|@ApiProperty|"
         r"interface\s+\w+(Dto|Request|Response)|class\s+\w+(Dto|Request|Response)|\.proto|openapi|swagger|"
         r"StatusCode|ProblemDetails|HttpException|version", re.I),
+    # logging, metrics and tracing calls: the code emits signals someone relies on
+    "observability": re.compile(
+        r"\bILogger\b|\blogger\.|\blog\.(error|warn|info|debug)|_logger\.|console\.error|LogError|LogWarning|"
+        r"Sentry|captureException|OpenTelemetry|ActivitySource|StartActivity|\btracer\.|\bspan\.|"
+        r"prometheus|statsd|meter\.|Counter<|Histogram<|structlog|logging\.getLogger|slog\.|zap\.", re.I),
 }
 ALWAYS = ["correctness", "error-handling", "tests"]
 SPECIALIST_LENSES = ("concurrency", "data", "security", "api-contract")  # deep: first one a shard has
@@ -166,7 +171,7 @@ def main():
     # Depth tuning
     for i, s in enumerate(out_shards):
         if a.depth == "quick":
-            s["lenses"] = [l for l in s["lenses"] if l not in ("performance", "test-quality", "ui-state")]
+            s["lenses"] = [l for l in s["lenses"] if l not in ("performance", "test-quality", "ui-state", "observability")]
             s["report_nits"] = False
         elif a.depth == "deep":
             s["report_nits"] = i < 3 and len(out_shards) <= 6

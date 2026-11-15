@@ -4,7 +4,8 @@
   python scripts/install.py --target cursor                    # all skills -> ~/.cursor/skills
   python scripts/install.py --target codex                     # all skills -> ~/.agents/skills
   python scripts/install.py --target claude --scope project --project ../my-app
-  python scripts/install.py --target all --skills tl-code-refactor,tl-seo-audit --dry-run
+  python scripts/install.py --target all --skills tl-code-review,tl-security-audit --dry-run
+  python scripts/install.py --target cursor --agents-only --skills tl-code-review   # sub-agents only
 
 Skills are copied flat (<skills-dir>/<skill-name>/SKILL.md) so every tool finds them regardless
 of whether it scans category folders. Sub-agent definitions shipped in a skill's agents/*.md are
@@ -58,6 +59,8 @@ PLATFORM_ONLY = {
 # Repository-only files at a skill's root: the user guide (same name as USER_GUIDE in
 # tl-skill-eval/scripts/lint_skill.py) and its rendered HTML copy. Agents never read them.
 REPO_ONLY = {"WORKFLOW.md", "WORKFLOW.html"}
+# Local caches and run folders that are never part of a skill.
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".refactor-run"}
 # Claude Code-only frontmatter keys that Cursor does not understand
 CURSOR_DROP_KEYS = {"tools", "skills"}
 
@@ -81,9 +84,31 @@ def check_frontmatter(skill_md):
         sys.exit(f"{skill_md}: description is {len(str(meta['description']))} chars (limit 1024)")
 
 
+def git_ignored(paths):
+    """The subset of paths git ignores (.gitignore, .git/info/exclude), so local scratch folders in a
+    clone are not installed. Outside a git checkout (a release archive) nothing is ignored."""
+    if not paths or not (REPO / ".git").exists() or not shutil.which("git"):
+        return set()
+    rel = [p.relative_to(REPO).as_posix() for p in paths]
+    try:
+        # -z: NUL-separated in and out, so no quoting and no CRLF translation on Windows
+        r = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-z", "--stdin"],
+                           input="\0".join(rel).encode("utf-8") + b"\0", capture_output=True)
+    except OSError:
+        return set()
+    if r.returncode not in (0, 1):  # 1 = none ignored; anything else = not usable here
+        return set()
+    hit = set(r.stdout.decode("utf-8", "replace").split("\0"))
+    return {p for p, s in zip(paths, rel) if s in hit}
+
+
 def find_skills():
     out = {}
-    for skill_md in sorted(SKILLS_SRC.rglob("SKILL.md")):
+    found = sorted(SKILLS_SRC.rglob("SKILL.md"))
+    ignored = git_ignored(found)
+    for skill_md in found:
+        if skill_md in ignored:
+            continue
         check_frontmatter(skill_md)
         m = re.search(r"^name:\s*\"?([\w-]+)\"?\s*$", skill_md.read_text(encoding="utf-8"), re.M)
         name = m.group(1) if m else skill_md.parent.name
@@ -198,6 +223,12 @@ TOOLS = [
     {"id": "osv-scanner", "label": "osv-scanner", "needs": {"tl-security-audit": "optional"},
      "why": "known-vulnerability audit across ecosystems", "check": lambda: bool(shutil.which("osv-scanner")),
      "how": None, "manual": "see https://google.github.io/osv-scanner/installation/"},
+    {"id": "md2html-deps", "label": "markdown-it-py etc.", "needs": {"tl-md-to-html": "required"},
+     "why": "md2html.py parses and highlights with markdown-it-py, mdit-py-plugins, linkify-it-py, pygments",
+     "check": lambda: all(importlib.util.find_spec(m) is not None
+                          for m in ("markdown_it", "mdit_py_plugins", "linkify_it", "pygments")),
+     "how": ("pip", "markdown-it-py mdit-py-plugins linkify-it-py pygments"),
+     "manual": "{py} -m pip install markdown-it-py mdit-py-plugins linkify-it-py pygments"},
 ]
 
 
@@ -217,7 +248,7 @@ def pip_install(package):
     cmd = [sys.executable, "-m", "pip", "install"]
     if sys.prefix == sys.base_prefix:  # not in a virtualenv: install for this user only
         cmd.append("--user")
-    cmd.append(package)
+    cmd.extend(package.split())  # one tool may need several packages
     print("  $", " ".join(cmd))
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode == 0:
@@ -312,7 +343,11 @@ def main():
                     help="user: ~/.<tool>/  project: <project>/.<tool>/")
     ap.add_argument("--project", default=".", help="project root for --scope project")
     ap.add_argument("--skills", help="comma-separated skill names (default: all)")
-    ap.add_argument("--no-agents", action="store_true", help="do not install sub-agent definitions")
+    agents = ap.add_mutually_exclusive_group()
+    agents.add_argument("--no-agents", action="store_true", help="do not install sub-agent definitions")
+    agents.add_argument("--agents-only", action="store_true",
+                        help="install only the sub-agent definitions, not the skill folders (e.g. Cursor "
+                             "reading the skills from .claude/skills)")
     ap.add_argument("--force", action="store_true", help="overwrite files that differ")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--deps", choices=["ask", "check", "skip"], default="ask",
@@ -325,6 +360,8 @@ def main():
     unknown = [s for s in requested if s not in available]
     if unknown:
         sys.exit(f"unknown skill(s): {', '.join(unknown)}. Available: {', '.join(available)}")
+    if a.skills:
+        requested = add_required_skills(requested, available)
     targets = sorted(TARGETS) if a.target == "all" else [a.target]
     all_wanted = set()
     for target in targets:
@@ -335,6 +372,28 @@ def main():
                     "check" if a.dry_run else a.deps)
     if not a.dry_run:
         print("\nrestart the tool (or open a new chat/session) so it picks up new skills and agents")
+
+
+# Skills that read files from a sibling skill folder at run time, so installing one without the
+# other leaves broken paths. The tl-architecture-doc modules read the core skill's references and
+# scripts; the core's feature-mapper agent reads the feature-view module.
+_ARCH_MODULES = ["tl-architecture-doc-enterprise", "tl-architecture-doc-feature-view",
+                 "tl-architecture-doc-security", "tl-architecture-doc-observability"]
+SKILL_REQUIRES = {"tl-architecture-doc": _ARCH_MODULES, **{m: ["tl-architecture-doc"] for m in _ARCH_MODULES}}
+
+
+def add_required_skills(requested, available):
+    """Return `requested` plus every skill it needs (transitively), announcing the additions."""
+    result, queue = list(requested), list(requested)
+    while queue:
+        for dep in SKILL_REQUIRES.get(queue.pop(), []):
+            if dep in available and dep not in result:
+                result.append(dep)
+                queue.append(dep)
+    added = result[len(requested):]
+    if added:
+        print(f"also installing required skill(s): {', '.join(added)}")
+    return result
 
 
 def install_target(a, target, requested, available):
@@ -356,9 +415,10 @@ def install_target(a, target, requested, available):
         src_dir = available[name]
         dst_dir = skills_dir / name
         # files of the skill itself (including agents/, so the skill stays self-contained)
-        for src in sorted(p for p in src_dir.rglob("*") if p.is_file()):
+        skill_files = [] if a.agents_only else sorted(p for p in src_dir.rglob("*") if p.is_file())
+        for src in skill_files:
             rel = src.relative_to(src_dir)
-            if any(part in ("__pycache__", ".refactor-run") for part in rel.parts) or src.suffix == ".pyc":
+            if any(part in SKIP_DIRS for part in rel.parts) or src.suffix == ".pyc":
                 continue
             if str(rel) in REPO_ONLY:
                 continue
@@ -396,7 +456,10 @@ def install_target(a, target, requested, available):
                 dst.write_text(text, encoding="utf-8", newline="\n")
 
     verb = "would install" if a.dry_run else "installed"
-    print(f"  {verb} {len(wanted)} skill(s) ({n_files} files) -> {skills_dir}")
+    if a.agents_only:
+        print(f"  skill folders not copied (--agents-only); {len(wanted)} skill(s) selected")
+    else:
+        print(f"  {verb} {len(wanted)} skill(s) ({n_files} files) -> {skills_dir}")
     if not a.no_agents:
         note = {"cursor": " (frontmatter converted for Cursor: model: inherit, tools/skills removed)",
                 "codex": " (converted to Codex custom-agent TOML)"}.get(target, "")

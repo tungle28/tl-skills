@@ -175,11 +175,12 @@ python scripts/pipeline.py run finish --run-dir $RUN_DIR
 - **Learn (hỏi người dùng)**: khi `run finish` in gợi ý `learn:`, agent chạy `memory.py learn`, đưa danh sách đề xuất cho người dùng và chỉ ghi vào `triage.yml` những đề xuất được duyệt. Chi tiết ở mục 11 và `references/cross-run-memory.md`.
 - **Bảng trong report**: theo quy ước cột cố định ở `references/report-tables.md`; `run finish` chuẩn hoá mọi bảng (kể cả bảng agent viết trong surface.md) và in `WARNING: table repaired` nếu phải sửa, nên `report.md` chuyển sang HTML (tl-md-to-html, `render_html.py`) không cần chỉnh tay.
 - **Keep report private**: `report.md` ở ngoài repo và PR.
-- **HTML (tuỳ chọn)**: `scripts/render_html.py --run-dir $RUN_DIR` → `report.html` cạnh `report.md`, gồm tab Report và tab Findings (bảng lọc theo severity/OWASP/status, và theo new/persisting khi có run trước; tìm kiếm; mở rộng từng dòng). Secret được che như `report.md`; trang chạy offline. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng cuối tóm tắt.
+- **Checks run** (ngay sau Executive summary): mỗi bước đã chạy một dòng kèm **ran / skipped / failed** và kết quả (inventory, pattern rules, semgrep, taint, osv-scanner/npm audit/…, reviewer, verifier), rồi một dòng **Skipped** gồm các thư mục bị loại thực sự có trong repo (vd. `**/node_modules (12)`), glob `--exclude`, vendored, test, migration, lockfile, file lớn/minified, file ngoài scope, shard bị hoãn. Inventory ghi các thư mục này vào `inventory.json` → `excluded`.
+- **HTML (tuỳ chọn)**: `scripts/render_html.py --run-dir $RUN_DIR` → `report.html` cạnh `report.md`, gồm tab Report và tab Findings: mỗi finding một card (evidence, attack scenario, fix) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/OWASP/status/quyết định, và theo new/persisting khi có run trước; tìm kiếm. Nút "Sao chép cho agent" chép danh sách quyết định kèm đường dẫn run; dán lại cho agent thì mục Sửa là danh sách finding chọn cho mode `fix`. Secret được che như `report.md`; trang chạy offline. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng cuối tóm tắt.
 
 ## 10. Phase 8 — Fix
 
-Chỉ ở `fix` mode, chỉ cho finding người dùng chọn. Chi tiết trong `references/fix-playbook.md`.
+Chỉ ở `fix` mode, chỉ cho finding người dùng chọn. Chi tiết trong `references/fix-playbook.md`. Sau mỗi finding, agent ghi kết quả bằng `scripts/record_fix.py <RUN_DIR>/fixes.json --id … --status fixed|partial|failed --what … --verify …` (`fixed` bắt buộc có `--verify`) rồi dựng lại `report.html`: finding đã sửa chuyển sang mục "Đã sửa" kèm việc đã làm và cách xác minh, giống báo cáo repo-hygiene; finding sửa một phần hoặc chưa được vẫn giữ card, có ghi lần thử.
 
 - **Loop**: branch mới → baseline test xanh → mỗi finding một commit kèm regression test → test đỏ thì revert.
 - **Secrets**: người dùng tự rotate; xoá khỏi code không có nghĩa là đã thu hồi.

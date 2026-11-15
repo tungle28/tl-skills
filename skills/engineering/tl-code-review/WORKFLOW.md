@@ -90,7 +90,7 @@ flowchart LR
 
 ## 5. Phase 1 — Context
 
-Bốn nguồn chạy song song, độc lập nhau:
+Bốn nguồn chạy song song; riêng `fetch_pr_context.py` (nguồn ngữ cảnh ngoài) nên bắt đầu không muộn hơn static checks, để static checks bỏ qua phần CI đã chạy:
 
 | Source | Output | Notes |
 |---|---|---|
@@ -173,7 +173,11 @@ Script gộp finding, loại finding bị verifier bác, gộp trùng, tách l�
 
 **Chat summary** (bằng ngôn ngữ của người dùng): verdict + tóm tắt, blocker/major kèm `file:line` và cách sửa, số lượng phần còn lại, requirement coverage và trạng thái CI, coverage caveats, và bước tiếp theo (sửa, review lại, post lên PR, chạy tl-security-audit / tl-code-refactor).
 
-**HTML (tuỳ chọn, chỉ khi chạy harness)**: `scripts/render_html.py --dir $RUN --lang vi` → `report.html` cạnh `report.md`, gồm tab Report và tab Findings (bảng lọc theo severity/category/verification/bucket, tìm kiếm, mở rộng từng dòng để xem evidence và cách sửa). Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng. Review inline cho snippet hay diff nhỏ không có report nên không có HTML; với PR, comment trên PR vẫn là đầu ra chính.
+**Kiểm tra đã chạy** (ngay sau Tóm tắt trong `report.md`): resolve_scope, từng lệnh static (eslint/tsc/… kèm pass/fail), reviewer (shard + lượt cross-cutting/lens, số file đã đọc), verifier, blast radius, PR context; rồi một dòng **Bỏ qua**: file bị loại gộp theo thư mục gốc kèm số lượng, file vượt `--max-files`, shard rủi ro thấp bị hoãn. Ghi chú bỏ qua của từng shard vẫn nằm ở mục Độ phủ & giới hạn.
+
+**HTML (tuỳ chọn, chỉ khi chạy harness)**: `scripts/render_html.py --dir $RUN --lang vi` → `report.html` cạnh `report.md`, gồm tab Report và tab Findings: mỗi finding một card (evidence, vì sao quan trọng, cách sửa) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/category/verification/bucket/quyết định, tìm kiếm. Nút "Sao chép cho agent" chép danh sách quyết định kèm đường dẫn run để dán lại cho agent sửa. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng. Review inline cho snippet hay diff nhỏ không có report nên không có HTML; với PR, comment trên PR vẫn là đầu ra chính.
+
+**Sau khi sửa**: khi agent sửa finding của một lần chạy (vd. từ khối "Sao chép cho agent"), mỗi finding được ghi bằng `scripts/record_fix.py $RUN/fixes.json --id … --status fixed|partial|failed --what … --verify …`, rồi dựng lại `report.html`: finding đã sửa chuyển sang mục "Đã sửa" kèm việc đã làm, cách xác minh, file và commit.
 
 ## 10. Phase 6 — Post to PR
 

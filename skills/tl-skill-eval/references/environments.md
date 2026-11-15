@@ -43,6 +43,17 @@ All scripts are stdlib Python and read and write UTF-8 explicitly. On Windows, c
 - **No `claude` on PATH:** `npm i -g @anthropic-ai/claude-code`. `claude -p` reuses the
   credentials of an existing Claude Code login.
 
+## Headless harness runs (`claude -p`)
+
+Observed behaviour, not documented API, so re-check it on the installed Claude Code version:
+- A `claude -p` run of a harness skill that waits on background sub-agents can end at a
+  background-wait ceiling (about 600 s seen) before the harness finishes. Setting the env var
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` for the run avoided it; a cut-off run could be
+  continued with `claude --resume <session_id>`.
+- Set a cost cap before starting, and use a fixture larger than one context: on a small fixture a
+  no-skill baseline can already find everything (ceiling effect), so the run only shows the
+  harness's cost overhead.
+
 ## Detecting capabilities
 
 - `which claude` → trigger eval and description loop possible.

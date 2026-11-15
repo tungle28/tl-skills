@@ -10,10 +10,22 @@ run never reads findings an earlier run left behind, and earlier runs stay for c
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 BASE = ".code-review"
+SUPPORTED_LANGS = ("en", "vi")
+
+
+def norm_lang(value, prog="tl-code-review"):
+    """A BCP-47 tag (vi, vi-VN, ja) as a supported heading language; others fall back to en with a
+    warning. Never an argparse error: aggregate_findings.py exit 2 means 'request changes'."""
+    code = re.split(r"[-_]", (value or "en").strip().lower())[0]
+    if code in SUPPORTED_LANGS:
+        return code
+    print(f"[{prog}] --lang {value!r}: no {code or '?'} headings, falling back to en", file=sys.stderr)
+    return "en"
 
 
 def label_for(text):

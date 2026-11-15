@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="vi" data-pref="auto" data-tpl="arch">
 <head>
-<meta name="source-sha256" content="a2bd5661ed0d0f91e3f4cc1921a008547491924c6ef4c208dfd9362c811615ee">
+<meta name="source-sha256" content="d91030ae0a7894823adbe195ef3770c3c08a51007f837e580747e82ad1f03322">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tl-security-audit — How It Works</title>
@@ -420,12 +420,13 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 <li><strong>Learn (hỏi người dùng)</strong>: khi <code>run finish</code> in gợi ý <code>learn:</code>, agent chạy <code>memory.py learn</code>, đưa danh sách đề xuất cho người dùng và chỉ ghi vào <code>triage.yml</code> những đề xuất được duyệt. Chi tiết ở mục 11 và <code>references/cross-run-memory.md</code>.</li>
 <li><strong>Bảng trong report</strong>: theo quy ước cột cố định ở <code>references/report-tables.md</code>; <code>run finish</code> chuẩn hoá mọi bảng (kể cả bảng agent viết trong <a href="http://surface.md">surface.md</a>) và in <code>WARNING: table repaired</code> nếu phải sửa, nên <code>report.md</code> chuyển sang HTML (tl-md-to-html, <code>render_html.py</code>) không cần chỉnh tay.</li>
 <li><strong>Keep report private</strong>: <code>report.md</code> ở ngoài repo và PR.</li>
-<li><strong>HTML (tuỳ chọn)</strong>: <code>scripts/render_html.py --run-dir $RUN_DIR</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report và tab Findings (bảng lọc theo severity/OWASP/status, và theo new/persisting khi có run trước; tìm kiếm; mở rộng từng dòng). Secret được che như <code>report.md</code>; trang chạy offline. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng cuối tóm tắt.</li>
+<li><strong>Checks run</strong> (ngay sau Executive summary): mỗi bước đã chạy một dòng kèm <strong>ran / skipped / failed</strong> và kết quả (inventory, pattern rules, semgrep, taint, osv-scanner/npm audit/…, reviewer, verifier), rồi một dòng <strong>Skipped</strong> gồm các thư mục bị loại thực sự có trong repo (vd. <code>**/node_modules (12)</code>), glob <code>--exclude</code>, vendored, test, migration, lockfile, file lớn/minified, file ngoài scope, shard bị hoãn. Inventory ghi các thư mục này vào <code>inventory.json</code> → <code>excluded</code>.</li>
+<li><strong>HTML (tuỳ chọn)</strong>: <code>scripts/render_html.py --run-dir $RUN_DIR</code> → <code>report.html</code> cạnh <code>report.md</code>, gồm tab Report và tab Findings: mỗi finding một card (evidence, attack scenario, fix) có chọn Sửa / Bỏ qua / Để sau và ghi chú; lọc theo severity/OWASP/status/quyết định, và theo new/persisting khi có run trước; tìm kiếm. Nút &quot;Sao chép cho agent&quot; chép danh sách quyết định kèm đường dẫn run; dán lại cho agent thì mục Sửa là danh sách finding chọn cho mode <code>fix</code>. Secret được che như <code>report.md</code>; trang chạy offline. Làm khi người dùng yêu cầu; nếu không thì gợi ý một dòng cuối tóm tắt.</li>
 </ul>
 </section>
 <section class="sec">
 <h2 id="10-phase-8--fix">10. Phase 8 — Fix<a class="anchor" href="#10-phase-8--fix" title="Permanent link">#</a></h2>
-<p>Chỉ ở <code>fix</code> mode, chỉ cho finding người dùng chọn. Chi tiết trong <code>references/fix-playbook.md</code>.</p>
+<p>Chỉ ở <code>fix</code> mode, chỉ cho finding người dùng chọn. Chi tiết trong <code>references/fix-playbook.md</code>. Sau mỗi finding, agent ghi kết quả bằng <code>scripts/record_fix.py &lt;RUN_DIR&gt;/fixes.json --id … --status fixed|partial|failed --what … --verify …</code> (<code>fixed</code> bắt buộc có <code>--verify</code>) rồi dựng lại <code>report.html</code>: finding đã sửa chuyển sang mục &quot;Đã sửa&quot; kèm việc đã làm và cách xác minh, giống báo cáo repo-hygiene; finding sửa một phần hoặc chưa được vẫn giữ card, có ghi lần thử.</p>
 <div class="grid terms"><div class="card"><div class="card-title">Loop</div><p>branch mới → baseline test xanh → mỗi finding một commit kèm regression test → test đỏ thì revert.</p></div><div class="card"><div class="card-title">Secrets</div><p>người dùng tự rotate; xoá khỏi code không có nghĩa là đã thu hồi.</p></div><div class="card"><div class="card-title">Commits</div><p>theo convention của repo và mọi quy tắc duyệt commit (ví dụ tl-code-commit).</p></div></div>
 </section>
 <section class="sec">

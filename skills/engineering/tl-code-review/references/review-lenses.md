@@ -101,7 +101,7 @@ can back with evidence from the code.
 - Keys in lists; derived state duplicated into state.
 - Money/number formatting and locale.
 
-### observability
+### observability (logging, metrics, tracing calls; not in `--depth quick`)
 - Errors logged with enough context (correlation id, entity id) and without PII.
 - New critical flow has metrics/traces; log level appropriate (no error-level for expected cases).
 

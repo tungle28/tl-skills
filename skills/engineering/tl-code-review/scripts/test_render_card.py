@@ -74,6 +74,25 @@ class Card(unittest.TestCase):
         self.assertNotIn("<script", page)
         self.assertNotIn("http", page.split("<body>")[1])
 
+    def test_card_page_shows_recorded_fixes(self):
+        fx = self.d / "fixes.json"
+        run("record_fix.py", str(fx), "--id", "S01-004", "--status", "fixed", "--what", "Guarded <null>",
+            "--verify", "pytest: 3 passed", "--files", "src/a.ts", "--commit", "abc1234")
+        run("record_fix.py", str(fx), "--id", "S01-003", "--status", "failed", "--what", "needs a schema change")
+        run("record_fix.py", str(fx), "--id", "NOPE-1", "--status", "partial", "--what", "typo id")
+        out = self.d / "card.html"
+        r = run("render_html.py", "--dir", str(self.d), "--template", "card", "-o", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("NOPE-1", r.stderr)                                   # unknown id is reported
+        self.assertIn("1 fixed", r.stdout)
+        page = out.read_text(encoding="utf-8")
+        self.assertIn('<span class="badge b-ok">Fixed</span>', page)
+        self.assertIn('<span class="badge b-bad">Not fixed</span>', page)
+        self.assertIn("Fix result</dt><dd>Guarded &lt;null&gt;", page)
+        self.assertNotIn("Guarded <null>", page)
+        self.assertIn("<code>abc1234</code>", page)
+        self.assertIn('<div class="n ok">1</div><div class="l">Fixed since</div>', page)
+
     def test_old_findings_json_still_renders(self):
         doc = json.loads((self.d / "findings.json").read_text(encoding="utf-8"))
         for k in ("rejected_findings", "coverage", "positives"):
@@ -83,6 +102,84 @@ class Card(unittest.TestCase):
                 "-o", str(self.d / "vi.html"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Bị verifier bác", (self.d / "vi.html").read_text(encoding="utf-8"))
+
+
+class Lang(unittest.TestCase):
+    """--lang takes any BCP-47 tag: region subtags map to their language, others fall back to en.
+    A bad argument never exits 2, which is the 'request changes' CI code."""
+    setUp, tearDown = Card.setUp, Card.tearDown
+
+    def aggregate(self, *args):
+        r = run("aggregate_findings.py", "--dir", str(self.d), *args)
+        self.assertIn(r.returncode, (0, 2), r.stderr)
+        self.assertNotIn("invalid choice", r.stderr)
+        return r, (self.d / "report.md").read_text(encoding="utf-8")
+
+    def test_tabs_page_has_decisions_and_copy_for_agent(self):
+        out = self.d / "tabs.html"
+        r = run("render_html.py", "--dir", str(self.d), "--lang", "vi-VN", "-o", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        page = out.read_text(encoding="utf-8")
+        data = json.loads(page.split('<script type="application/json" id="data">')[1].split("</script>")[0])
+        self.assertEqual(data["text"]["copy"], "Sao chép cho agent")      # vi-VN -> vi labels
+        self.assertIn(str(self.d.resolve()), data["handoff"]["head"])      # the agent is told which run
+        self.assertTrue(data["handoff"]["key"].startswith("review:"))
+        self.assertLessEqual({"S01-003", "S01-004"}, {r["id"] for r in data["rows"]})
+        for needle in ('id="cards"', 'class="dock"', 'id="copy"', "card sv'", 'name="d'):
+            self.assertIn(needle, page)
+        self.assertNotIn('<tbody id="rows">', page)                        # no findings table any more
+
+    def test_record_fix_moves_finding_to_fixed(self):
+        fx = self.d / "fixes.json"
+        r = run("record_fix.py", str(fx), "--id", "S01-003", "--status", "fixed", "--what", "Guarded <null>",
+                "--verify", "pytest: 3 passed", "--files", "src/a.ts, src/b.ts", "--commit", "abc1234")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = run("record_fix.py", str(fx), "--id", "S01-004", "--status", "fixed", "--what", "x")
+        self.assertNotEqual(r.returncode, 0)                                # fixed without --verify is refused
+        run("record_fix.py", str(fx), "--id", "S01-004", "--status", "failed", "--what", "needs a schema change")
+        run("record_fix.py", str(fx), "--id", "NOPE-1", "--status", "partial", "--what", "typo id")
+        run("record_fix.py", str(fx), "--id", "S01-003", "--status", "fixed", "--what", "Guarded again",
+            "--verify", "pytest: 4 passed")                                 # same id replaces the entry
+        doc = json.loads(fx.read_text(encoding="utf-8"))
+        self.assertEqual([e["id"] for e in doc["fixes"]], ["S01-003", "S01-004", "NOPE-1"])
+        self.assertEqual(doc["fixes"][0]["what"], "Guarded again")
+        out = self.d / "tabs.html"
+        r = run("render_html.py", "--dir", str(self.d), "--lang", "vi", "-o", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("NOPE-1", r.stderr)                                   # unknown id is reported
+        self.assertIn("1 fixed", r.stdout)
+        page = out.read_text(encoding="utf-8")
+        data = json.loads(page.split('<script type="application/json" id="data">')[1].split("</script>")[0])
+        fix = {x["id"]: x.get("fix") for x in data["rows"]}
+        self.assertEqual(fix["S01-003"]["status"], "fixed")
+        self.assertEqual(fix["S01-004"]["status"], "failed")
+        self.assertIn('id="fixed-head"', page)
+        self.assertIn('id="tiles"', page)
+        self.assertNotIn("Guarded <null>", page.split('<script type="application/json"')[0].replace(
+            "Guarded &lt;null&gt;", ""))                                    # escaped wherever it is shown
+        self.assertIn('<section class="fix-results" id="fix-results"><h2>Kết quả sửa</h2>', page)
+        self.assertIn("1 đã sửa · 0 sửa một phần · 1 chưa sửa được", page)  # NOPE-1 is not counted
+        self.assertIn('<a href="#fix-results">Kết quả sửa</a>', page)       # first entry of the nav
+
+    def test_unsupported_lang_falls_back_to_en(self):
+        r, report = self.aggregate("--lang", "ja")
+        self.assertIn("Code Review Report", report)
+        self.assertIn("falling back to en", r.stderr)
+
+    def test_region_subtag(self):
+        _, report = self.aggregate("--lang", "vi-VN")
+        self.assertIn("Báo cáo Code Review", report)
+
+    def test_usage_error_is_not_exit_2(self):
+        r = run("aggregate_findings.py", "--dir", str(self.d), "--max-nits", "many")
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_post_review_and_compare_accept_any_lang(self):
+        r = run("post_review.py", "--dir", str(self.d), "--format", "markdown", "--lang", "fr-CA")
+        self.assertNotIn("invalid choice", r.stderr)
+        self.assertIn("falling back to en", r.stderr)
+        r = run("compare_runs.py", "--base", str(self.d / "nope"), "--list", "--lang", "ja")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

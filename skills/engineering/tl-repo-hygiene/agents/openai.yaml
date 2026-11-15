@@ -1,0 +1,6 @@
+interface:
+  display_name: "Repo Hygiene"
+  short_description: "Audit a whole project and its agent instructions, fix the sure issues, report the rest"
+  default_prompt: "Use $tl-repo-hygiene to review this whole project, including AGENTS.md and skills: fix what you are sure about and give me an HTML report of proposals to approve."
+policy:
+  allow_implicit_invocation: true

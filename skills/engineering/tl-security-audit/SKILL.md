@@ -1,6 +1,6 @@
 ---
 name: tl-security-audit
-description: "Audit a codebase (whole repo, a module, or a PR/changeset) for security vulnerabilities — secrets, injection, XSS, SSRF, broken access control/IDOR, auth and session flaws, crypto misuse, misconfiguration, supply chain and CI/CD, deserialization, fail-open error handling, business-logic and race conditions, runaway-cost loops — in C#/.NET, JS/TS (NestJS, React, Nuxt), Python, Go, PHP (Laravel), Flutter, IaC and CI, mapped to OWASP Top 10:2025 and CWE. Phased, resumable pipeline: taint dataflow (OpenGrep), pattern/gate rules, dependency audit, parallel reviewers, adversarial verification, then an evidence-backed report with a security architecture view; optional fixes. Use whenever the user asks for a security review/audit, vulnerability or secret scan, OWASP check, \"is this code secure\", or says \"kiểm tra bảo mật\", \"rà soát bảo mật\", \"audit security\", \"scan lỗ hổng\", even without the word \"audit\"."
+description: "Audit a codebase (whole repo, a module, or a PR/changeset) for security vulnerabilities — secrets, injection, XSS, SSRF, broken access control/IDOR, auth and session flaws, crypto misuse, misconfiguration, supply chain and CI/CD, deserialization, business-logic and race conditions, runaway-cost loops — in .NET, JS/TS, Python, Go, PHP, Flutter, IaC and CI, mapped to OWASP Top 10:2025 and CWE, with an evidence-backed report and optional fixes. Not for general bug or regression review of a diff (use tl-code-review). Use whenever the user asks for a security review/audit, vulnerability or secret scan, OWASP check, \"is this code secure\", or says \"kiểm tra bảo mật\", \"rà soát bảo mật\", \"audit security\", \"scan lỗ hổng\", even without the word \"audit\"."
 license: MIT
 ---
 
@@ -101,7 +101,7 @@ token-expensive review is scoped.
 **Taint engine first.** `python3 $S/scripts/engine.py status`. If no engine is found:
 - In a disposable sandbox (e.g. claude.ai's code environment): run `python3 $S/scripts/engine.py install`.
 - On the user's own machine, ask first, once: "Install OpenGrep v1.30.0 (~45 MB) into
-  ~/.cache/security-audit to enable dataflow analysis?"
+  ~/.cache/security-audit/bin to enable dataflow analysis?"
 - `install` refuses to run when `cosign` is missing, because the binary's signature cannot be
   verified. It also finds the release name, e.g. `cosign-windows-amd64`, which is all winget
   puts on PATH. Tell the user and let them choose: install cosign and retry (on Windows,
@@ -138,21 +138,14 @@ judge reviewer output.
 
 **If your environment supports sub-agents (e.g. Claude Code, Cursor, Codex):** check whether
 `tl-security-shard-reviewer`, `tl-security-surface-reviewer` and `tl-security-verifier` are available agent
-types (a skill's own `agents/` folder is not auto-loaded; plugins and the repository's
-`scripts/install.py` register them). If they are missing, ask the user before installing them —
-that writes outside the run directory:
-- **Claude Code:** copy `$S/agents/tl-security-*.md` as-is into `.claude/agents/` or `~/.claude/agents/`.
-- **Cursor:** copy them into `.cursor/agents/` or `~/.cursor/agents/`, and in each copy set
-  `model: inherit` and delete the `tools:` line — Cursor only accepts `inherit` or a Cursor model ID.
-- **Codex:** custom agents are TOML files in `.codex/agents/` or `~/.codex/agents/` — one
-  `<name>.toml` per agent with `name`, `description` (from the frontmatter) and
-  `developer_instructions` (the Markdown body); leave `model` out so it inherits the session's.
-  The repository's `scripts/install.py --target codex` generates exactly this.
-- Other tools: follow that tool's sub-agent format; the body of each file is the prompt.
-
-Newly installed agents may only load in a new session, so for **this** run dispatch a
-general-purpose sub-agent whose task message is the full body of the matching `$S/agents/<name>.md`
-followed by the parameters below. Always pass `SKILL_DIR=$S` (absolute path): agents do not preload
+types (a skill's own `agents/` folder is not auto-loaded). If not, ask the user before installing
+them (it writes outside the run directory): the repository installer does it per tool
+(`scripts/install.py --target claude|cursor|codex --skills tl-security-audit`); by hand, copy
+`$S/agents/*.md` into the tool's agents folder in its format (Claude Code unchanged; Cursor:
+`model: inherit`, no `tools`/`skills`; Codex: one TOML per agent with `name`, `description`,
+`developer_instructions` = the body). Newly installed agents may only load in a new session, so for
+**this** run dispatch a general-purpose sub-agent whose task message is the full body of
+`$S/agents/<name>.md` followed by the parameters below; the output files are identical. Always pass `SKILL_DIR=$S` (absolute path): agents do not preload
 the skill, so they resolve `references/` and `checks/` through it. Then in one turn dispatch, by
 `REVIEW_MODE`:
 - `solo` (whole repo, one shard, ≤ 5 KLOC): only one `tl-security-surface-reviewer`:
@@ -223,15 +216,14 @@ starting `duplicate of <id>`, so it is never learned as a false positive.
    repository and PRs — it maps weaknesses. In chat: coverage gaps first, then top 5 findings in one line each, counts by
    severity, and any secret needing rotation — not the whole report. In a scoped run, keep the
    `[outside review scope]` label on anything outside the changeset and leave it out of the counts.
-3. **HTML version (option):** `python3 $S/scripts/render_html.py --run-dir $RUN_DIR` writes
-   `report.html` next to `report.md`. It is a single page with two tabs. The Report tab shows
-   `report.md` with a section nav. The Findings tab shows every live finding in one table: filter
-   by severity, OWASP category and status, search as you type, and expand a row for its evidence,
-   scenario, impact and fix. The page masks secrets with the same rules as `report.md`, works
-   offline, and has light and dark themes. Build it when the user asks for HTML or for a report
-   that is easier to review, before or after the run. Otherwise end the chat summary with a
-   one-line offer. Re-render it after any `run finish`. Handle it like `report.md`: give its path,
-   and keep it out of the repository.
+3. **HTML version (option):** `python3 $S/scripts/render_html.py --run-dir $RUN_DIR` writes an
+   offline `report.html` (report + one filterable card per finding with Fix / Skip / Later and a
+   note, and a "Copy for agent" button; secrets masked like `report.md`). A pasted decision block
+   from that button names the run: treat its Fix list as the user's selection for `fix` mode, and
+   Skip items with a note as triage proposals (Phase 7), still confirmed before writing `triage.yml`.
+   Build it when the user asks for HTML or an easier-to-review report; otherwise end the chat
+   summary with a one-line offer. Re-render after any `run finish`. Handle it like `report.md`:
+   give its path, keep it out of the repository.
 
 4. **Learn (ask the user).** When `run finish` prints a `learn:` hint, follow the learning step in
    `references/cross-run-memory.md`. Write to `triage.yml` only the proposals the user approves.
@@ -244,6 +236,8 @@ Follow `references/fix-playbook.md`: branch, green baseline, one finding per com
 regression test, revert on red, secrets rotated by the user (never assume removal = revocation).
 Commits follow the repository's commit convention and any commit-approval rule the user or another
 installed skill has set (e.g. per-commit approval) — the playbook explains how to batch approvals.
+Record every outcome with `scripts/record_fix.py <RUN_DIR>/fixes.json` (playbook step 9) and render
+`report.html` again, so the page shows what was fixed and how it was verified.
 
 ## Resuming
 `pipeline.py status --run-dir $RUN_DIR` shows phases, pending shards/batches and the next step. To

@@ -2,7 +2,7 @@
 #
 #   .\scripts\install.ps1                                  # all skills -> Claude Code (~\.claude)
 #   .\scripts\install.ps1 -Target cursor
-#   .\scripts\install.ps1 -Target all -Skills tl-code-refactor,tl-seo-audit -DryRun
+#   .\scripts\install.ps1 -Target all -Skills tl-code-review,tl-security-audit -DryRun
 #   .\scripts\install.ps1 -Target claude -Scope project -Project ..\my-app
 #
 # Without a clone (downloads the release archive to a temp dir, installs, deletes it):
@@ -25,6 +25,7 @@ param(
   [string]$Project,
   [string[]]$Skills,
   [switch]$NoAgents,
+  [switch]$AgentsOnly,
   [switch]$Force,
   [switch]$DryRun,
   [ValidateSet('ask', 'check', 'skip')]
@@ -141,6 +142,7 @@ if ($Project) {
 }
 if ($Skills) { $pyArgs += @('--skills', ($Skills -join ',')) }
 if ($NoAgents) { $pyArgs += '--no-agents' }
+if ($AgentsOnly) { $pyArgs += '--agents-only' }
 if ($Force) { $pyArgs += '--force' }
 if ($DryRun) { $pyArgs += '--dry-run' }
 if ($Deps) { $pyArgs += @('--deps', $Deps.ToLowerInvariant()) }

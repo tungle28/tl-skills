@@ -13,8 +13,8 @@ Review checks are applied by agents to every shard whose languages/frameworks/tr
 | Nuxt 3/4 (Nitro/h3) + Vue SFC | `nuxt.yml` | 5 | 6 | `nuxt-server` | package.json (`nuxt`, `nuxt-auth-utils`, `@sidebase/nuxt-auth`) |
 | PHP — Laravel, Symfony, plain PHP, Blade | `php.yml` | 3 | 7 | `php-laravel` | composer.json (`laravel/framework`, `symfony/framework-bundle`) |
 | Python — Django, Flask, FastAPI | `python.yml` | 10 | 2 | - | requirements / pyproject |
-| Runaway cost + money operations (C#, JS, Python, Go) | `runaway.yml` | 1 | 5 | `runaway-cost`, `business-logic` | - |
-| Secrets (all files) | `secrets.yml` | 13 | 0 | `secrets-management` | - |
+| Runaway cost + money operations (C#, JS, Python, Go) | `runaway.yml` | 1 | 6 | `runaway-cost`, `business-logic` | - |
+| Secrets (all files) | `secrets.yml` | 14 | 0 | `secrets-management` | - |
 
 Taint rule packs (`rules/taint/`, run by `scripts/taint.py`; intra-function, cross-function and
 cross-file chains):
@@ -35,7 +35,9 @@ rate-limiting-dos, runaway-cost, llm-integration, api-data-exposure.
 
 Dependency audit (deps phase): hygiene for npm, NuGet, pip, Go modules (go.sum, local replace) and
 pub (pubspec.lock, `any`, unpinned git deps); CVEs via osv-scanner (covers go.mod and pubspec.lock),
-npm audit, dotnet, pip-audit, govulncheck (reachability-aware for Go).
+npm audit, dotnet, pip-audit, govulncheck (reachability-aware for Go: a called vulnerable symbol is `high`, an imported but
+uncalled package `medium`, a required module whose package is not imported `low`; one entry per
+module and advisory).
 
 Taint skips vendored front-end assets (`app-assets/`, `third_party/`, `public/**/{lib,libs,plugins,themes,vendor}/`,
 see `common.vendor_root`) and minified/generated files; the review skips the vendored assets unless
