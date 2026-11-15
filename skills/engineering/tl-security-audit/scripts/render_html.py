@@ -254,7 +254,7 @@ h2.fixed-head{margin-top:28px}
 .fixbox{margin:8px 0 0;padding:8px 12px;border-radius:8px;background:var(--code-bg)}
 .fix-results{padding:10px 14px;border:1px solid var(--border);border-left:4px solid var(--ok);border-radius:8px;background:var(--panel)}.fix-results ul{margin:6px 0 0;padding-left:20px}
 .fixnote{margin:8px 0;padding:8px 12px;border-radius:8px;border:1px dashed var(--s1);font-size:14px}
-.hidden{display:none}
+.hidden{display:none}.dock[hidden]{display:none}.card{scroll-margin-top:110px}td a[href^="#f-"]{white-space:nowrap}
 @media (max-width:860px){.layout{grid-template-columns:1fr;gap:8px}nav{position:static;max-height:none;display:flex;flex-wrap:wrap;gap:4px}
 .filters{top:0;position:static}.filters input{min-width:0}}
 @media print{header.top,nav,.filters,.dock,.decide{display:none}.layout{display:block;padding:0}.panel[hidden]{display:block}body{background:#fff;color:#000}}
@@ -276,6 +276,7 @@ UI_TEXT = {
         "f_files": "Files", "f_commit": "Commit", "partial": "Partly fixed", "failed": "Fix attempt failed",
         "details": "Finding details", "fix_results": "Fix results",
         "fix_line": "{fixed} fixed · {partial} partly fixed · {failed} not fixed · last update {at}",
+        "c_id": "ID", "c_sev": "Severity", "c_title": "Issue", "c_loc": "Location",
     },
     "vi": {
         "report": "Báo cáo", "findings": "Finding", "theme": "Đổi sáng/tối",
@@ -293,6 +294,7 @@ UI_TEXT = {
         "f_files": "File", "f_commit": "Commit", "partial": "Sửa một phần", "failed": "Sửa chưa được",
         "details": "Chi tiết finding", "fix_results": "Kết quả sửa",
         "fix_line": "{fixed} đã sửa · {partial} sửa một phần · {failed} chưa sửa được · cập nhật lần cuối {at}",
+        "c_id": "ID", "c_sev": "Mức", "c_title": "Vấn đề", "c_loc": "Vị trí",
     },
 }
 
@@ -315,8 +317,13 @@ JS = r"""
   function show(name){tabs.forEach(function(t){var on=t.getAttribute("data-tab")===name;t.setAttribute("aria-selected",on);
     document.getElementById("panel-"+t.getAttribute("data-tab")).hidden=!on;});
     document.getElementById("nav").hidden=name!=="report";
+    document.querySelector(".dock").hidden=name!=="findings";  // decisions are made, and copied, on the Findings tab
     document.querySelector(".layout").classList.toggle("wide",name!=="report");try{location.hash=name==="report"?"":"findings";}catch(e){}}
   tabs.forEach(function(t){t.addEventListener("click",function(){show(t.getAttribute("data-tab"));});});
+  // an ID in the Report tab's finding tables opens that finding's card
+  document.addEventListener("click",function(ev){var a=ev.target.closest&&ev.target.closest('a[href^="#f-"]');if(!a)return;
+    var el=document.getElementById(decodeURIComponent(a.getAttribute("href").slice(1)));if(!el)return;
+    ev.preventDefault();show("findings");el.scrollIntoView({block:"start"});});
   // decisions, kept in this browser only
   var KEY="tl-findings:"+(H.key||document.title), state={};
   try{state=JSON.parse(localStorage.getItem(KEY)||"{}")||{};}catch(e){state={};}
@@ -448,6 +455,72 @@ def fix_results(rows, fixes, T, inline):
             f'<p>{e(T["fix_line"].format(at=at or "-", **n))}</p><ul>{lis}</ul></section>')
 
 
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+# report.md's "…and N more (see findings.json)" line after a truncated list: not part of the last block
+MORE_RE = re.compile(r"^_?(?:…|\.\.\.)\s*and \d+ more\b")
+
+
+def compact_findings(report_md, rows, T):
+    """Report tab text: each run of per-finding detail blocks in report.md (a ### to ###### heading that
+    names a finding ID, down to the next heading of the same or a higher level) becomes one short table —
+    ID (links to the card), severity, issue, location. The details live on the Findings tab; report.md
+    itself is not changed. IDs a table of the same section already lists are not listed again."""
+    by_id = {r["id"]: r for r in rows}
+    if not by_id:
+        return report_md
+    id_re = re.compile(r"(?<![\w-])(" + "|".join(re.escape(i) for i in sorted(by_id, key=len, reverse=True))
+                       + r")(?![\w-])")
+    lines = report_md.splitlines()
+    out, run, listed, fence, i = [], [], set(), False, 0
+
+    def cell(s):
+        return re.sub(r"\s+", " ", str(s or "")).strip().replace("|", "\\|")
+
+    def flush():
+        ids = [x for x in dict.fromkeys(run) if x not in listed]
+        run.clear()
+        if not ids:
+            return
+        out.extend(["", f"| {T['c_id']} | {T['c_sev']} | {T['c_title']} | {T['c_loc']} |", "|---|---|---|---|"])
+        for x in ids:
+            r = by_id[x]
+            out.append(f"| [{cell(x)}](#f-{x}) | {cell(r.get('sev'))} | {cell(r.get('title'))} | "
+                       + (f"`{cell(r['loc'])}`" if r.get("loc") else "") + " |")
+        out.append("")
+
+    while i < len(lines):
+        line, s = lines[i], lines[i].strip()
+        if s.startswith("```"):
+            fence = not fence
+        m = None if fence else HEADING_RE.match(s)
+        hit = id_re.search(m.group(2)) if m and len(m.group(1)) >= 3 else None
+        if hit:  # a finding's detail block: skip it, down to the next heading at its level or above
+            level, inner = len(m.group(1)), False
+            run.append(hit.group(1))
+            i += 1
+            while i < len(lines):
+                t = lines[i].strip()
+                if t.startswith("```"):
+                    inner = not inner
+                elif not inner:
+                    h = HEADING_RE.match(t)
+                    if (h and len(h.group(1)) <= level) or MORE_RE.match(t):
+                        break
+                i += 1
+            continue
+        if m:
+            flush()
+            listed.clear()
+        elif not fence and MORE_RE.match(s):
+            flush()  # the table first, then the note that says it is truncated
+        elif s.startswith("|") and not fence:
+            listed.update(id_re.findall(s))
+        out.append(line)
+        i += 1
+    flush()
+    return "\n".join(out)
+
+
 def page(report_md, rows, severities, facets, lang, handoff=None, fixes=None):
     """rows: [{id, sev, title, loc, facets: {name: value}, details: [[label, text, is_code], ...]}].
     A detail labelled "Details" is shown as the card's meta line. handoff: {"head": line placed above
@@ -457,7 +530,7 @@ def page(report_md, rows, severities, facets, lang, handoff=None, fixes=None):
     T = ui_text(lang)
     fixes = fixes or {}
     rows = [{**r, "fix": fixes[r["id"]]} if r["id"] in fixes else r for r in rows]
-    body, sections = Markdown(severities).convert(report_md)
+    body, sections = Markdown(severities).convert(compact_findings(report_md, rows, T))
     m = re.search(r"^#\s+(.*)$", report_md, re.M)
     title = re.sub(r"[`*]", "", m.group(1)).strip() if m else "Report"
     nav = "".join(f'<a href="#{a}">{Markdown(severities).inline(t)}</a>' for a, t in sections)
@@ -483,7 +556,7 @@ def page(report_md, rows, severities, facets, lang, handoff=None, fixes=None):
             f'<p class="count" id="count"></p><div id="cards"></div>'
             f'<h2 class="fixed-head" id="fixed-head" hidden></h2><div id="fixed"></div>'
             f'<p class="empty" id="empty" hidden>{e(T["none"])}</p></section></main></div>'
-            f'<div class="dock"><span class="progress" id="progress"></span>'
+            f'<div class="dock" hidden><span class="progress" id="progress"></span>'
             f'<button type="button" class="primary" id="copy"></button></div>'
             f'<script type="application/json" id="data">{data}</script><script>{JS}</script></body></html>')
 

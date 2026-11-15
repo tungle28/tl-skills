@@ -98,7 +98,7 @@ Apply each fix, verify it, and record it. If verification fails, revert that fix
   "root": "absolute path",
   "generated": "2026-01-01T10:00:00",
   "language": "vi",
-  "summary": "2–4 sentences: overall health and the most important items.",
+  "summary": ["2–5 short points, one idea each: overall health, then the most important items"],
   "skipped": ["node_modules", "dist"],
   "checks_run": [{"command": "pytest -q", "result": "pass", "note": "48 passed"}],
   "fixed": [{

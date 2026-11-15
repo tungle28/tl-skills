@@ -273,8 +273,9 @@ Keep the chat summary tight; the report file holds the detail.
 
 **HTML version (option, harness runs only):** `python3 $S/scripts/render_html.py --dir $RUN --lang <en|vi>`
 (add `--report <path>` if you passed `--out` to the aggregator) writes an offline `report.html`
-(report + one filterable card per finding with Fix / Skip / Later, a note and a "Copy for agent"
-button; a pasted block names the run, and its Fix list is what the user wants fixed) next to
+(a Report tab that lists findings as a short table linking to their cards, and a Findings tab with
+one filterable card per finding with Fix / Skip / Later, a note and a "Copy for agent" button; a
+pasted block names the run, and its Fix list is what the user wants fixed) next to
 `report.md`; `--template card` writes a printable
 summary instead, for a report to read or pass on rather than filter. Build either when the user
 asks for HTML or an easier-to-review report; otherwise, when the run produced a report, end the

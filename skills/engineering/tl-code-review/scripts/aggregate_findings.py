@@ -51,6 +51,8 @@ L10N = {
         "raised": "already raised by a human reviewer",
         "v_block": "❌ REQUEST CHANGES", "v_comment": "💬 APPROVE WITH COMMENTS", "v_ok": "✅ APPROVE",
         "v_assess": "📋 ASSESSMENT (no merge verdict for non-diff scope)",
+        "s_sev": "By severity", "s_check": "Needs confirmation", "s_pre": "Pre-existing",
+        "s_rejected": "Rejected by the verifier", "s_baseline": "Hidden by the baseline",
     },
     "vi": {
         "title": "Báo cáo Code Review", "scope": "Phạm vi", "verdict": "Kết luận", "summary": "Tóm tắt",
@@ -64,6 +66,8 @@ L10N = {
         "raised": "reviewer khác đã nêu",
         "v_block": "❌ REQUEST CHANGES", "v_comment": "💬 APPROVE WITH COMMENTS", "v_ok": "✅ APPROVE",
         "v_assess": "📋 ĐÁNH GIÁ (không áp dụng verdict merge cho phạm vi không phải diff)",
+        "s_sev": "Theo mức độ", "s_check": "Cần xác nhận", "s_pre": "Có sẵn từ trước",
+        "s_rejected": "Bị verifier bác", "s_baseline": "Ẩn theo baseline",
     },
 }
 
@@ -365,9 +369,11 @@ def main():
     L.append(scope + f" · {s.get('files', '?')} files · +{s.get('added', 0)}/-{s.get('deleted', 0)}\n\n")
     L.append(f"**{T['verdict']}:** {verdict}\n\n")
     counts = " · ".join(f"{SEV_ICON[k]} {k}: {len(v)}" for k, v in by_sev.items())
-    L.append(f"**{T['summary']}:** {counts} · needs-check: {len(check)} · pre-existing: {len(pre)} "
-             f"· rejected by verifier: {rejected} · baseline-suppressed: {suppressed}"
-             + (f" · CI: {prctx['ci_summary']}" if prctx.get("available") else "") + "\n\n")
+    # One point per line: a single " · "-joined line was hard to read.
+    L.append(f"**{T['summary']}:**\n\n- {T['s_sev']}: {counts}\n- {T['s_check']}: {len(check)}\n"
+             f"- {T['s_pre']}: {len(pre)}\n- {T['s_rejected']}: {rejected}\n"
+             + (f"- {T['s_baseline']}: {suppressed}\n" if suppressed or a.baseline else "")
+             + (f"- CI: {prctx['ci_summary']}\n" if prctx.get("available") else "") + "\n")
     if manifest.get("intent"):
         L.append("<details><summary>Change intent (commit messages)</summary>\n\n```\n"
                  + "\n".join(manifest["intent"][:30]) + "\n```\n</details>\n")

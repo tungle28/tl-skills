@@ -151,6 +151,19 @@ def fix_lines(L: dict, f: dict) -> str:
             + (f"<p class='muted'><b>{e(L['commit'])}:</b> <code>{e(f['commit'])}</code></p>" if f.get("commit") else ""))
 
 
+def summary_html(summary) -> str:
+    """The summary as one bullet per point: a list of strings, or a string with one point per line
+    (leading "- " is dropped). A single-line string stays a paragraph."""
+    if isinstance(summary, list):
+        points = [str(x).strip() for x in summary]
+    else:
+        points = [ln.strip().lstrip("-*• ").strip() for ln in str(summary or "").splitlines()]
+    points = [p for p in points if p]
+    if len(points) <= 1:
+        return f"<p>{e(points[0] if points else '')}</p>"
+    return "<ul class='summary'>" + "".join(f"<li>{e(p)}</li>" for p in points) + "</ul>"
+
+
 def render(data: dict, fixes: dict | None = None, source: str = "", fixes_file: str = "") -> str:
     lang = data.get("language", "en")
     L = LABELS.get(lang, LABELS["en"])
@@ -293,7 +306,7 @@ p {{ margin:4px 0; }} code {{ font:13px ui-monospace,Consolas,monospace; backgro
 .id,.sev,.cat {{ font-size:12px; padding:1px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }}
 .sev-high .sev {{ color:var(--high); border-color:var(--high); }} .sev-medium .sev {{ color:var(--medium); border-color:var(--medium); }}
 .sev-low .sev {{ color:var(--low); border-color:var(--low); }} .cat.ok {{ color:var(--ok); border-color:var(--ok); }}
-.ev {{ margin:4px 0; padding-left:20px; font-size:14px; }}
+.ev {{ margin:4px 0; padding-left:20px; font-size:14px; }} .summary {{ margin:4px 0; padding-left:20px; }} .summary li {{ margin:3px 0; }}
 .fixbox {{ margin:8px 0; padding:8px 12px; border-radius:8px; background:var(--bg); }}
 .fixnote {{ margin:8px 0; padding:8px 12px; border-radius:8px; border:1px dashed var(--medium); font-size:14px; }}
 .fix-results {{ margin:12px 0; padding:10px 14px; border:1px solid var(--line); border-left:4px solid var(--ok); border-radius:8px; background:var(--card); }}
@@ -314,7 +327,7 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; color:var(--muted); }}
 <p class="muted">{e(data.get('root', ''))} · {e(L['generated'])}: {e(data.get('generated', ''))}</p>
 <div class="tiles">{''.join(stat_tiles)}</div>
 <h2>{e(L['summary'])}</h2>
-<p>{e(data.get('summary', ''))}</p>
+{summary_html(data.get('summary'))}
 {results}
 {f"<h4>{e(L['checks'])}</h4><ul class='ev'>{checks}</ul>" if checks else ''}
 {f"<p class='muted'>{e(L['skipped'])}: {skipped}</p>" if skipped else ''}
@@ -400,6 +413,16 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; color:var(--muted); }}
       navigator.clipboard.writeText(text).then(done, fallback);
     }} else {{ fallback(); }}
   }});
+  // the copy button belongs where decisions are made: show it only while a proposal card is on screen
+  var bar = document.querySelector(".bar");
+  if (cards.length && window.IntersectionObserver) {{
+    var onScreen = new Set(); bar.hidden = true;
+    var io = new IntersectionObserver(function (es) {{
+      es.forEach(function (e) {{ if (e.isIntersecting) onScreen.add(e.target); else onScreen.delete(e.target); }});
+      bar.hidden = !onScreen.size;
+    }});
+    cards.forEach(function (c) {{ io.observe(c); }});
+  }}
   refresh();
 }})();
 </script>

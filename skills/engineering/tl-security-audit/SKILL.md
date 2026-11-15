@@ -202,9 +202,10 @@ starting `duplicate of <id>`, so it is never learned as a false positive.
 1. Write `$RUN_DIR/narrative.json` from the collect table and the verdicts, then render once:
    `python3 $S/scripts/pipeline.py run finish --run-dir $RUN_DIR` (marks verify done, renders
    `report.md`). Narrative content in the user's language, English headings:
-   - `executive_summary`: 5–8 sentences — overall posture, the 2–3 root causes behind most findings
-     (e.g. "ownership is checked per handler and several handlers forget it"), the most serious
-     risks in business terms, and the biggest coverage caveats.
+   - `executive_summary`: a Markdown bullet list, 5–8 bullets of one idea each — overall posture,
+     the 2–3 root causes behind most findings (e.g. "ownership is checked per handler and several
+     handlers forget it"), the most serious risks in business terms, and the biggest coverage
+     caveats. No run-on paragraph.
    - `roadmap`: sequenced — rotate exposed secrets and fix critical exposure first; then systemic
      fixes that close many findings at once (a global query filter, a fallback authorization policy,
      a shared validation layer); then the rest; each step naming finding ids and effort.
@@ -218,7 +219,8 @@ starting `duplicate of <id>`, so it is never learned as a false positive.
    `[outside review scope]` label on anything outside the changeset and leave it out of the counts.
 3. **HTML version (option):** `python3 $S/scripts/render_html.py --run-dir $RUN_DIR` writes an
    offline `report.html` (report + one filterable card per finding with Fix / Skip / Later and a
-   note, and a "Copy for agent" button; secrets masked like `report.md`). A pasted decision block
+   note, and a "Copy for agent" button on the Findings tab; the Report tab lists findings as a short
+   table linking to their cards; secrets masked like `report.md`). A pasted decision block
    from that button names the run: treat its Fix list as the user's selection for `fix` mode, and
    Skip items with a note as triage proposals (Phase 7), still confirmed before writing `triage.yml`.
    Build it when the user asks for HTML or an easier-to-review report; otherwise end the chat
