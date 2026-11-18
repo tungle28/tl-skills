@@ -173,19 +173,110 @@ class Diff(unittest.TestCase):
         self.assertEqual({f["id"]: f["baseline_id"] for f in cur}, {"N-env": "O-env", "N-root": "O-root"})
         self.assertEqual(d["gone"], [])
 
-    def test_restated_elsewhere_is_not_a_miss(self):
+    def test_same_cwe_in_another_file_is_a_possible_miss(self):
+        # Run 20261115 (agoyu): baseline S126-002 (EloquentOpenApiService.php:213-222, international
+        # rates, CWE-639) was filed as "reported differently (S67-004 RoomTemporaryController.php)"
+        # only because both were access-control/CWE-639, so it left the report and the possible-miss
+        # list. A finding in another file that even cites these lines (S121-003, domestic rates) is
+        # another API: location decides; the other finding is only named as a hint.
         r = Repo(self)
-        r.write("src/app.ts", "app.use(express.json({ limit: '1mb' }));\n")
-        r.write("src/routes/auth.ts", "router.post('/login', async (req, res) => {\n")
+        r.write("Services/OpenApiService.php", "<?php\nclass OpenApiService {\n  function updateRate($rateId, $data) {\n"
+                "    return $this->rates->update($rateId, $data);\n  }\n}\n")
+        r.write("Controllers/DomesticController.php", "<?php\nclass DomesticController {\n  function update($id) {\n"
+                "    return DomesticRate::find($id)->update(request()->all());\n  }\n}\n")
         src = Sources(r.root)
-        old = [{"id": "O-1", "file": "src/app.ts", "line_start": 1, "line_end": 1, "cwe": "CWE-307",
-                "category": "rate-limiting-dos", "owasp": "A07", "status": "verified", "fp": src.hashes("src/app.ts", 1)}]
-        cur = [{"id": "N-1", "file": "src/routes/auth.ts", "line_start": 1, "line_end": 1, "cwe": "CWE-307",
-                "category": "rate-limiting-dos", "owasp": "A07", "status": "verified",
-                "fp": src.hashes("src/routes/auth.ts", 1)}]
+        old = [{"id": "S126-002", "file": "Services/OpenApiService.php", "line_start": 3, "line_end": 4,
+                "cwe": "CWE-639", "category": "access-control", "owasp": "A01", "status": "verified", "severity": "high",
+                "fp": src.hashes("Services/OpenApiService.php", 3, 4)}]
+        cur = [{"id": "S121-003", "file": "Controllers/DomesticController.php", "line_start": 3, "line_end": 4,
+                "cwe": "CWE-639", "category": "access-control", "owasp": "A01", "status": "verified", "severity": "high",
+                "related": [{"file": "Services/OpenApiService.php", "line_start": 3, "line_end": 4}],
+                "fp": src.hashes("Controllers/DomesticController.php", 3, 4)}]
+        run, st = self._runs(r, old)
+        d = diff_runs(run, {"findings": cur}, st, {"scope": {"kind": "full"}})
+        g = d["gone"][0]
+        self.assertEqual(g["id"], "S126-002")
+        self.assertTrue(g["reason"].startswith("code unchanged, not reported"), g["reason"])
+        self.assertTrue(g.get("possible_miss"))
+        self.assertIn("S121-003", g["reason"])  # named as a hint to check, not as the match
+        self.assertEqual(cur[0]["delta"], "new")
+
+    def test_restated_at_the_same_place_is_reported_differently(self):
+        # two findings of one Dockerfile merged into one a few lines further down
+        r = Repo(self)
+        r.write("Dockerfile", "FROM node:18-alpine\nWORKDIR /app\nCOPY . .\nRUN npm ci\nUSER root\nCMD node server.js\n")
+        src = Sources(r.root)
+        old = [{"id": "O-1", "file": "Dockerfile", "line_start": 1, "line_end": 1, "cwe": "CWE-1104",
+                "category": "containers", "owasp": "A02", "status": "verified", "fp": src.hashes("Dockerfile", 1)}]
+        cur = [{"id": "N-1", "file": "Dockerfile", "line_start": 5, "line_end": 6, "cwe": "CWE-250",
+                "category": "containers", "owasp": "A02", "status": "verified", "fp": src.hashes("Dockerfile", 5, 6)}]
         run, st = self._runs(r, old)
         d = diff_runs(run, {"findings": cur}, st, {"scope": {"kind": "full"}})
         self.assertTrue(d["gone"][0]["reason"].startswith("code unchanged, reported differently (N-1"))
+        self.assertNotIn("possible_miss", d["gone"][0])
+
+    def test_downgraded_finding_is_a_severity_change_not_gone(self):
+        # Run 20261115 (agoyu): S05-001 was high at AgoyuUserController.php:140-219 (CWE-269) and is
+        # still reported, medium, at 212-219 (CWE-862). The fingerprints (first lines of each span)
+        # differ, so the report listed it as gone and the current one as new.
+        r = Repo(self)
+        body = "".join(f"    $step{i} = $this->service->handle($request, {i});\n" for i in range(1, 40))
+        r.write("Controllers/UserController.php", "<?php\nclass UserController {\n  public function store($request) {\n"
+                + body + "    return $this->users->assignRole($request->input('role'));\n  }\n}\n")
+        src = Sources(r.root)
+        old = [{"id": "S05-001", "file": "Controllers/UserController.php", "line_start": 3, "line_end": 44,
+                "cwe": "CWE-269", "category": "access-control", "owasp": "A01", "status": "verified", "severity": "high",
+                "title": "Route creates users and changes roles without a permission check",
+                "fp": src.hashes("Controllers/UserController.php", 3, 44)}]
+        lines = src.lines("Controllers/UserController.php")
+        r.write("Controllers/UserController.php", "\n".join([lines[0], "// a line added above: code moved down"]
+                                                            + lines[1:]) + "\n")
+        src = Sources(r.root)
+        cur = [{"id": "S05-001", "file": "Controllers/UserController.php", "line_start": 38, "line_end": 45,
+                "cwe": "CWE-862", "category": "access-control", "owasp": "A01", "status": "verified", "severity": "medium",
+                "title": "Role change without permission check", "fp": src.hashes("Controllers/UserController.php", 38, 45)}]
+        run, st = self._runs(r, old)
+        d = diff_runs(run, {"findings": cur}, st, {"scope": {"kind": "full"}})
+        self.assertEqual(d["gone"], [])
+        self.assertEqual((cur[0]["delta"], cur[0]["baseline_id"], cur[0]["baseline_severity"]),
+                         ("persisting", "S05-001", "high"))
+        self.assertEqual([(c["baseline_id"], c["from"], c["to"]) for c in d["severity_changed"]],
+                         [("S05-001", "high", "medium")])
+
+    def test_report_lists_severity_change_and_possible_miss(self):
+        # report.md, "Changes Since Previous Run": a downgraded finding is shown as a severity change,
+        # never as gone; a finding matched only by CWE elsewhere stays a possible miss in Coverage Gaps
+        import findings
+        r = Repo(self)
+        r.write("a.php", "<?php\nfunction updateRate($rateId, $data) {\n  return Rate::find($rateId)->update($data);\n}\n")
+        r.write("b.php", "<?php\nfunction updateUser($request) {\n  $user->assignRole($request->input('role'));\n"
+                         "  return $user->save();\n}\n")
+        src = Sources(r.root)
+        base = {"owasp": "A01", "category": "access-control", "status": "verified", "kind": "vulnerability",
+                "evidence": "e", "attack_scenario": "a", "impact": "i", "fix": "f", "confidence": "high",
+                "requires": "user", "sources": ["S1"], "from_hits": [], "priority": 1}
+        old = [{**base, "id": "OLD-RATE", "title": "rate IDOR", "file": "a.php", "line_start": 2, "line_end": 3,
+                "cwe": "CWE-639", "severity": "high", "fp": src.hashes("a.php", 2, 3)},
+               {**base, "id": "OLD-ROLE", "title": "role change", "file": "b.php", "line_start": 2, "line_end": 4,
+                "cwe": "CWE-269", "severity": "high", "fp": src.hashes("b.php", 2, 4)}]
+        cur = [{**base, "id": "NEW-ROLE", "title": "role change", "file": "b.php", "line_start": 3, "line_end": 3,
+                "cwe": "CWE-862", "severity": "medium", "fp": src.hashes("b.php", 3)},
+               {**base, "id": "NEW-OTHER", "title": "other IDOR", "file": "c.php", "line_start": 1, "line_end": 1,
+                "cwe": "CWE-639", "severity": "high", "fp": []}]
+        run, st = self._runs(r, old)
+        run.mkdir(exist_ok=True)
+        (run / "state.json").write_text(json.dumps(st))
+        (run / "inventory.json").write_text(json.dumps({"root": str(r.root), "scope": {"kind": "full"}, "files": []}))
+        (run / "merged.json").write_text(json.dumps({"findings": cur}))
+        findings.cmd_report(run)
+        md = (run / "report.md").read_text(encoding="utf-8")
+        changes = md.split("## Changes Since Previous Run")[1].split("\n## ")[0]
+        self.assertIn("| OLD-ROLE | NEW-ROLE | role change |", changes)
+        self.assertIn("high → medium", changes)
+        gone_rows = [l for l in changes.split("No longer reported:")[1].splitlines() if l.startswith("| OLD")]
+        self.assertEqual([l.split("|")[1].strip() for l in gone_rows], ["OLD-RATE"])
+        gaps = md.split("## Coverage Gaps")[1].split("\n## ")[0]
+        self.assertIn("OLD-RATE", gaps)
 
     def test_no_baseline(self):
         r = Repo(self)

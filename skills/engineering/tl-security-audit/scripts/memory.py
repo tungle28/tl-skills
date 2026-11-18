@@ -89,8 +89,16 @@ class Sources:
         return out
 
     def file_hashes(self, rel):
-        lines = self.lines(rel)
-        return None if lines is None else {h for h in map(line_hash, lines) if h}
+        lines = self.line_hashes(rel)
+        return None if lines is None else {h for h in lines if h}
+
+    def line_hashes(self, rel):
+        """line_hash of every line of the file (None for trivial lines), or None if it is missing."""
+        key = ("#hashes", rel)
+        if key not in self.cache:
+            lines = self.lines(rel)
+            self.cache[key] = None if lines is None else [line_hash(l) for l in lines]
+        return self.cache[key]
 
 
 def fingerprint(src, f):
@@ -206,30 +214,76 @@ def find_baseline(run, st):
     return best
 
 
+NEAR = 15  # lines: a restatement re-anchored this close to the old site is still the same place
+
+
+def span_now(o, src):
+    """(start, end) of a baseline finding in the current file: shifted to where its first
+    fingerprinted line is now (code above it added or removed), else as recorded."""
+    start = o.get("line_start") or 0
+    end = max(o.get("line_end") or start, start)
+    hashes = src.line_hashes(o["file"]) if o.get("fp") and start else None
+    if hashes:
+        at = [i + 1 for i, h in enumerate(hashes) if h == o["fp"][0]]
+        if at:
+            moved = min(at, key=lambda i: abs(i - start))
+            return moved, end + moved - start
+    return start, end
+
+
+def _span_share(a, b):
+    """Overlapping lines as a share of the shorter span (1.0 = one lies within the other)."""
+    inter = min(a[1], b[1]) - max(a[0], b[0]) + 1
+    return max(inter, 0) / max(min(a[1] - a[0], b[1] - b[0]) + 1, 1)
+
+
+def _span(f):
+    return (f.get("line_start") or 0, max(f.get("line_end") or 0, f.get("line_start") or 0))
+
+
 def _matches(old, new):
+    """Same flaw in both runs: same file and class, and the same code (fingerprints) or the same
+    place (one span lies mostly within the other: a finding re-reported over a narrower or wider
+    range, often with another CWE or severity)."""
     if old["file"] != new["file"] or not same_class(old, new):
         return False
     if old.get("fp") and new.get("fp"):
-        return same_code(old["fp"], new["fp"])
+        return same_code(old["fp"], new["fp"]) or _span_share(old.get("_span") or _span(old), _span(new)) >= 0.5
     return abs((old.get("line_start") or 0) - (new.get("line_start") or 0)) <= 15  # older run without fp
 
 
 def _pair_score(old, new):
-    """How well two matching findings fit: same CWE > same category > same OWASP, then code overlap."""
+    """How well two matching findings fit: same CWE > same category > same OWASP, then code overlap,
+    then line overlap."""
     a, b = set(old.get("fp") or []), set(new.get("fp") or [])
     overlap = len(a & b) / max(min(len(a), len(b)), 1) if a and b else 0
     return (4 * (bool(old.get("cwe")) and old.get("cwe") == new.get("cwe"))
             + 2 * (bool(old.get("category")) and old.get("category") == new.get("category"))
-            + (old.get("owasp") == new.get("owasp")) + overlap)
+            + (old.get("owasp") == new.get("owasp")) + overlap
+            + 0.5 * _span_share(old.get("_span") or _span(old), _span(new)))
+
+
+def _same_kind(o, f):
+    return any(o.get(k) and f.get(k) == o[k] for k in ("category", "cwe"))
 
 
 def _similar(o, cur):
-    """A current finding that likely restates `o` differently (other file, merged or split): same
-    CWE and category anywhere (rate limiting anchored at app.ts, then at the login route), or same
-    file and category (two Dockerfile findings merged into one)."""
+    """A current finding that restates `o` at the same place: same file, same category or CWE, lines
+    overlapping or within NEAR lines of o (two Dockerfile findings merged into one, a finding split
+    or re-anchored a few lines away). Location decides: the same CWE in another file is another
+    flaw until someone checks (one IDOR per endpoint is one finding each), see _elsewhere."""
+    s, e = o.get("_span") or _span(o)
     for f in cur:
-        same_cat = bool(o.get("category")) and f.get("category") == o["category"]
-        if same_cat and (f["file"] == o["file"] or (o.get("cwe") and f.get("cwe") == o["cwe"])):
+        if f["file"] == o["file"] and _same_kind(o, f) and f["line_start"] <= e + NEAR and s <= f["line_end"] + NEAR:
+            return f
+    return None
+
+
+def _elsewhere(o, cur):
+    """A current finding of the same category and CWE in another file: a hint for the re-check only."""
+    for f in cur:
+        if f["file"] != o["file"] and o.get("category") and o.get("cwe") and \
+                f.get("category") == o["category"] and f.get("cwe") == o["cwe"]:
             return f
     return None
 
@@ -246,6 +300,8 @@ def diff_runs(run, doc, st, inv):
     kind = inv.get("scope", {}).get("kind", "full")
     in_scope = {x["path"] for x in inv.get("files", []) if x.get("in_scope")}
     src = Sources(st["root"])
+    for o in old:  # the baseline's own merged.json is never written back
+        o["_span"] = span_now(o, src)
     # best pairs first: a greedy first-match lets a finding take a weaker partner (a `.env` finding
     # paired with the root-user finding of the same Dockerfile), leaving one "new" and one "gone"
     pairs = sorted(((_pair_score(o, f), i, j) for i, o in enumerate(old) for j, f in enumerate(cur) if _matches(o, f)),
@@ -258,15 +314,20 @@ def diff_runs(run, doc, st, inv):
         taken.add(j)
         cur[j]["delta"] = "persisting"
         cur[j]["baseline_id"] = old[i]["id"]
+        cur[j].pop("baseline_severity", None)
+        if old[i].get("severity") and old[i]["severity"] != cur[j].get("severity"):
+            cur[j]["baseline_severity"] = old[i]["severity"]  # still there, at another severity: not gone
     for j, f in enumerate(cur):
         if j not in taken:
             f["delta"] = "new"
+            f.pop("baseline_severity", None)
     live = [f for f in cur if f["status"] not in NOT_LIVE]
     gone = []
     for i, o in enumerate(old):
         if i in seen or (kind != "full" and o["file"] not in in_scope):
             continue
         hashes = src.file_hashes(o["file"])
+        miss = False
         if hashes is None:
             why = "file removed"
         elif o.get("fp") and not set(o["fp"]) <= hashes:
@@ -276,15 +337,22 @@ def diff_runs(run, doc, st, inv):
             s = _similar(o, live)
             why = f"code unchanged, reported differently ({s['id']} `{s['file']}:{s['line_start']}`)"
         elif o.get("fp"):
-            why = "code unchanged, not reported"  # likely missed this run — re-check
+            why, miss = "code unchanged, not reported", True  # likely missed this run — re-check
+            other = _elsewhere(o, live)
+            if other:
+                why += (f" (same CWE at {other['id']} `{other['file']}:{other['line_start']}`, another location: "
+                        "confirm it covers this before treating it as reported)")
         else:
             why = "not reported (no fingerprint in baseline)"
         gone.append({"id": o["id"], "title": o.get("title", ""), "file": o["file"], "line_start": o.get("line_start"),
-                     "severity": o.get("severity"), "reason": why})
+                     "severity": o.get("severity"), "reason": why, **({"possible_miss": True} if miss else {})})
+    changed = [{"id": f["id"], "baseline_id": f["baseline_id"], "title": f.get("title", ""), "file": f["file"],
+                "line_start": f.get("line_start"), "from": f["baseline_severity"], "to": f["severity"]}
+               for f in live if f.get("delta") == "persisting" and f.get("baseline_severity")]
     return {"baseline": str(base), "baseline_created": load_state(base).get("created_at"),
             "new": sum(1 for f in live if f.get("delta") == "new"),
             "persisting": sum(1 for f in live if f.get("delta") == "persisting"),
-            "gone": gone}
+            "severity_changed": changed, "gone": gone}
 
 
 # ------------------------------------------------------------------ learn

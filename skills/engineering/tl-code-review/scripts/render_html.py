@@ -13,6 +13,7 @@ one card per finding grouped as verified, needing confirmation, minor and reject
 open items. Standard library only; the page works offline (no external scripts, fonts or stylesheets).
 """
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -761,6 +762,46 @@ def load(p, default):
         return default
 
 
+def display_run_path(d):
+    """Return a portable run path for HTML, relative to the review repository when possible."""
+    raw = str(d)
+    if re.match(r"^[A-Za-z]:[\\/]", raw):
+        win = raw.replace("\\", "/")
+        parts = win.split("/")
+        for i in range(len(parts) - 1):
+            if tuple(x.lower() for x in parts[i:i + 2]) == (".code-review", "runs"):
+                return "/".join(parts[i:])
+        return parts[-1]
+    d = Path(d).resolve()
+    for parent in (d, *d.parents):
+        marker = parent / ".git"
+        if marker.is_dir() or marker.is_file():
+            return d.relative_to(parent).as_posix()
+    # Runs normally live under <repo>/.code-review/runs. If the repository root is not
+    # discoverable (for example in a copied fixture), keep only the run-relative suffix.
+    parts = d.parts
+    for i in range(len(parts) - 1):
+        if tuple(x.lower() for x in parts[i:i + 2]) == (".code-review", "runs"):
+            return Path(*parts[i:]).as_posix()
+    return d.name
+
+
+def decision_storage_key(d, repo_root=None, head=None):
+    """Make per-run browser state unique without embedding a machine path in HTML."""
+    d = Path(d).resolve()
+    for parent in (d, *d.parents):
+        marker = parent / ".git"
+        if marker.is_dir() or marker.is_file():
+            identity = f"{parent.name}/{d.relative_to(parent).as_posix()}"
+            break
+    else:
+        identity = f"{d.parent.name}/{display_run_path(d)}"
+    # repo_root disambiguates same-named clones; hash it so its absolute value never enters HTML.
+    identity += f"|{repo_root or ''}|{head or ''}"
+    digest = hashlib.sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+    return "review:" + digest
+
+
 def card_page(d, lang, fixes=None):
     """fixes: load_fixes() output. The card page keeps every finding in its section (it is the audit as
     reviewed) and marks a recorded outcome on the finding's card, with a tile counting the fixed ones."""
@@ -837,6 +878,7 @@ def card_page(d, lang, fixes=None):
     pr = prctx.get("pr") or {}
     pr_no = pr.get("number") or manifest.get("pr")
     repo = Path(manifest.get("repo_root", "")).name
+    run_path = display_run_path(d)
     title = (T["title_pr"].format(n=pr_no) if pr_no else T["title"]) + (f" · {repo}" if repo else "")
     s = manifest.get("stats", {})
     meta = [(T["head"], f"<code>{html.escape(str(manifest.get('head', '?')))}</code>"),
@@ -923,7 +965,7 @@ def card_page(d, lang, fixes=None):
             + f'<h2 id="dropped">{T["s_dropped"]}</h2>{cards(dropped + pre, "drop")}'
             + f'<h2 id="scope">{T["s_scope"]}</h2>' + (scope or f'<p>{T["none"]}</p>')
             + f'<h2 id="open">{T["s_open"]}</h2>' + (ul(open_items) if open_items else f'<p>{T["none"]}</p>')
-            + f'<footer><p>{T["footer"].format(dir=html.escape(str(d)))}</p></footer></main>')
+            + f'<footer><p>{T["footer"].format(dir=html.escape(run_path))}</p></footer></main>')
     return (f'<!doctype html><html lang="{html.escape(lang)}"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(title)}</title>'
             f'<link rel="icon" href="data:,"><style>{CARD_CSS}</style></head><body>{body}</body></html>'), len(found)
@@ -958,14 +1000,17 @@ def main():
         n_fixed = sum(1 for e in fixes.values() if e.get("status") == "fixed" and e.get("id") not in unknown)
         print(f"{out.resolve()} ({n} findings" + (f", {n_fixed} fixed" if n_fixed else "") + ")")
         return
-    where = str(d.resolve())
+    where = display_run_path(d)
     head = {"vi": f"Sửa các finding trong mục Sửa của lần review tl-code-review `{where}` (chi tiết ở findings.json); "
                   "không đụng mục Bỏ qua và Để sau. Sửa xong thì chạy lại test liên quan.",
             }.get(run_dir.norm_lang(a.lang, "render_html"),
                   f"Fix the findings under Fix from the tl-code-review run `{where}` (details in findings.json); "
                   "leave Skip and Later alone. Run the relevant tests after fixing.")
     write_page(out, report.read_text(encoding="utf-8"), rows_from(d),
-               SEVERITIES, ["Category", "Verification", "Bucket"], a.lang, {"head": head, "key": "review:" + where},
+               SEVERITIES, ["Category", "Verification", "Bucket"], a.lang,
+               {"head": head, "key": decision_storage_key(
+                   d, load(d / "manifest.json", {}).get("repo_root"),
+                   load(d / "manifest.json", {}).get("head_sha"))},
                fixes)
 
 

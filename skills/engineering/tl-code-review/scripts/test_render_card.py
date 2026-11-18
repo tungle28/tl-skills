@@ -48,6 +48,41 @@ class Card(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_run_path_is_relative_to_repository_root(self):
+        import render_html
+
+        review_repo = self.d / "checkout"
+        run = review_repo / ".code-review" / "runs" / "20261117-test"
+        run.mkdir(parents=True)
+        (review_repo / ".git").mkdir()
+        self.assertEqual(render_html.display_run_path(run), ".code-review/runs/20261117-test")
+        # A linked worktree stores .git as a file, which is still a valid repo marker.
+        worktree = self.d / "linked" / ".code-review" / "runs" / "wt-1"
+        worktree.mkdir(parents=True)
+        git_file = worktree.parents[2] / ".git"
+        git_file.write_text("gitdir: ../main/.git/worktrees/linked\n", encoding="utf-8")
+        self.assertEqual(render_html.display_run_path(worktree), ".code-review/runs/wt-1")
+
+    def test_run_path_fallbacks_and_storage_key(self):
+        import render_html
+
+        suffix = self.d / "copied" / ".code-review" / "runs" / "run-1"
+        suffix.mkdir(parents=True)
+        (self.d / "copied" / ".git").mkdir()
+        self.assertEqual(render_html.display_run_path(suffix), ".code-review/runs/run-1")
+        self.assertEqual(render_html.display_run_path(r"Z:\tl-render-standalone\run-2"), "run-2")
+        key1 = render_html.decision_storage_key(suffix)
+        other_checkout = self.d / "other" / ".code-review" / "runs" / "run-1"
+        other_checkout.mkdir(parents=True)
+        (self.d / "other" / ".git").mkdir()
+        self.assertNotEqual(key1, render_html.decision_storage_key(other_checkout))
+        self.assertNotIn(str(suffix.resolve()), key1)
+        self.assertEqual(render_html.display_run_path(r"C:\repo\.code-review\runs\run-3"),
+                         ".code-review/runs/run-3")
+        key_a = render_html.decision_storage_key(suffix, r"C:\a\app", "abc")
+        key_b = render_html.decision_storage_key(suffix, r"C:\b\app", "abc")
+        self.assertNotEqual(key_a, key_b)
+
     def test_findings_json_keeps_card_data(self):
         doc = json.loads((self.d / "findings.json").read_text(encoding="utf-8"))
         self.assertEqual(doc["rejected"], 1)
@@ -73,6 +108,19 @@ class Card(unittest.TestCase):
         self.assertIn("S01: skipped gen/*", page)
         self.assertNotIn("<script", page)
         self.assertNotIn("http", page.split("<body>")[1])
+        self.assertIn(f"<code>{self.d.name}</code>", page)
+        self.assertIn("<code>pr-7</code>", page)  # Head remains the reviewed commit/ref.
+        self.assertNotIn(str(self.d.resolve()), page)
+
+    def test_tabs_page_does_not_embed_absolute_run_path(self):
+        out = self.d / "tabs.html"
+        r = run("render_html.py", "--dir", str(self.d), "-o", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        page = out.read_text(encoding="utf-8")
+        data = json.loads(page.split('<script type="application/json" id="data">')[1].split("</script>")[0])
+        self.assertNotIn(str(self.d.resolve()), page)
+        self.assertRegex(data["handoff"]["key"], r"^review:[0-9a-f]{16}$")
+        self.assertIn(self.d.name, data["handoff"]["head"])
 
     def test_card_page_shows_recorded_fixes(self):
         fx = self.d / "fixes.json"
@@ -122,7 +170,7 @@ class Lang(unittest.TestCase):
         page = out.read_text(encoding="utf-8")
         data = json.loads(page.split('<script type="application/json" id="data">')[1].split("</script>")[0])
         self.assertEqual(data["text"]["copy"], "Sao chép cho agent")      # vi-VN -> vi labels
-        self.assertIn(str(self.d.resolve()), data["handoff"]["head"])      # the agent is told which run
+        self.assertNotIn(str(self.d.resolve()), data["handoff"]["head"])
         self.assertTrue(data["handoff"]["key"].startswith("review:"))
         self.assertLessEqual({"S01-003", "S01-004"}, {r["id"] for r in data["rows"]})
         for needle in ('id="cards"', 'class="dock"', 'id="copy"', "card sv'", 'name="d'):

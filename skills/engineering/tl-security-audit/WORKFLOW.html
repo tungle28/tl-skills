@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="vi" data-pref="auto" data-tpl="arch">
 <head>
-<meta name="source-sha256" content="9dce79bbc1aa6503e6bce44d908243ed059221309696f7a98f442fdc91f08895">
+<meta name="source-sha256" content="d4c2ab08726e6ca1a8a3667a2df97434dd8ee27b42d856e1d69810c5857b35ff">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tl-security-audit — How It Works</title>
@@ -277,7 +277,7 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 <section class="sec">
 <h2 id="6-phase-13--inventory-taint-scan-dependencies">6. Phase 1–3 — Inventory, Taint, Scan, Dependencies<a class="anchor" href="#6-phase-13--inventory-taint-scan-dependencies" title="Permanent link">#</a></h2>
 <p><strong>Taint engine</strong>: <code>engine.py status</code> kiểm tra OpenGrep. Trong sandbox dùng một lần thì cài luôn; trên máy người dùng thì hỏi một lần. <code>install</code> từ chối chạy khi thiếu <code>cosign</code> (không verify được chữ ký) — người dùng chọn cài cosign hoặc tự chấp nhận <code>--allow-unverified</code>; agent không tự thêm cờ này. Từ chối cài → ghi coverage gap và tiếp tục.</p>
-<div class="hl"><pre><code class="language-bash">python scripts/pipeline.py run scripted --run-dir $RUN_DIR   # [--depth 3] [--max-targets 150] [--offline]
+<div class="hl"><pre><code class="language-bash">python scripts/pipeline.py run scripted --run-dir $RUN_DIR   # [--depth 3] [--max-targets 150] [--max-memory-mb N] [--offline]
 </code></pre></div>
 <div class="table-wrap"><table>
 <thead>
@@ -296,7 +296,7 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 <tr>
 <td><code>taint</code></td>
 <td><code>scan/taint.json</code></td>
-<td>Luồng source → sink kèm trace cho C#, JS/TS, Python, Go, PHP, Dart (bỏ qua asset vendor và file minified): trong hàm, giữa hàm (cùng file), giữa file (confidence medium)</td>
+<td>Luồng source → sink kèm trace cho C#, JS/TS (cả phần <code>&lt;script&gt;</code> của <code>.vue</code>/<code>.svelte</code>), Python, Go, PHP, Dart: trong hàm, giữa hàm (cùng file), giữa file (confidence medium). Bỏ qua asset vendor và mọi file inventory đã bỏ (minified, quá lớn, generated). Mỗi lần chạy engine có giới hạn thời gian và RAM (<code>--max-memory-mb</code>); vượt thì kill cả cây tiến trình và ghi coverage gap</td>
 </tr>
 <tr>
 <td><code>scan</code></td>
@@ -408,11 +408,11 @@ li.task:has(input:checked){color:var(--muted);text-decoration:line-through;text-
 </code></pre></div>
 <ul>
 <li><strong>narrative.json</strong> (agent viết trước khi render): <em>executive summary</em> 5–8 câu — tư thế bảo mật tổng thể, 2–3 nguyên nhân gốc, rủi ro nghiêm trọng nhất theo ngôn ngữ kinh doanh, giới hạn coverage lớn nhất; <em>roadmap</em> — xoay vòng secret bị lộ và sửa critical trước, rồi sửa mang tính hệ thống (global query filter, fallback authorization policy, validation layer dùng chung), rồi phần còn lại.</li>
-<li><strong>So với run trước</strong>: mục &quot;Changes Since Previous Run&quot; gắn mỗi finding là <em>new</em> hoặc <em>persisting</em>, và liệt kê finding cũ đã hết:
+<li><strong>So với run trước</strong>: mục &quot;Changes Since Previous Run&quot; gắn mỗi finding là <em>new</em> hoặc <em>persisting</em>. Finding vẫn còn nhưng đổi mức (vd. high → medium) nằm ở bảng <em>Severity changed</em>, không bị tính là đã hết. Sau đó liệt kê finding cũ đã hết:
 <ul>
 <li><em>code changed</em>: có thể đã sửa, cần xác nhận.</li>
-<li><em>code unchanged, reported differently (id)</em>: cùng lỗi nhưng lần này được gộp, tách hoặc báo ở file khác.</li>
-<li><em>code unchanged, not reported</em>: có thể lần này bỏ sót. Mục này cũng được ghi vào Coverage Gaps.</li>
+<li><em>code unchanged, reported differently (id)</em>: cùng lỗi, cùng file và gần cùng chỗ, nhưng lần này được gộp, tách hoặc neo lệch vài dòng.</li>
+<li><em>code unchanged, not reported</em>: có thể lần này bỏ sót. Mục này cũng được ghi vào Coverage Gaps. Nếu có finding cùng CWE ở file khác thì finding đó chỉ được nêu làm gợi ý để kiểm tra; trùng CWE không đủ để coi là đã báo.</li>
 </ul>
 </li>
 <li><strong>Known from Earlier Runs</strong>: liệt kê finding khớp <code>triage.yml</code> (verdict, entry, lý do, hạn) để người dùng rà lại khi threat model thay đổi.</li>

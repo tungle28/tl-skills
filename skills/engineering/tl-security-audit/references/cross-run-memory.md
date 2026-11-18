@@ -43,14 +43,22 @@ reports. `memory.py list --root <repo>` shows the entries and which have expired
 `report` compares with a baseline run. By default that is the newest finished run of the same repo
 in `.security-run/`; `init --baseline <RUN_DIR>` picks another.
 
-- Each current finding is tagged `new` or `persisting` (with the baseline id).
+- Each current finding is tagged `new` or `persisting` (with the baseline id). A pair is the same
+  file and class with the same code (line fingerprints) or the same place: one span lies mostly
+  within the other, after shifting the baseline span to where its code is now. So a finding
+  re-reported over a narrower range, with another CWE or severity, still persists.
+- A persisting finding whose severity changed is listed under "Severity changed (still reported)"
+  with both severities, and its detail line says `persisting (was ID, high → medium)`. It is never
+  listed as gone.
 - "Changes Since Previous Run" lists baseline findings that are gone:
   - *code changed*: probably fixed. Confirm it.
-  - *code unchanged, reported differently (id)*: a finding with the same category this run is in
-    the same file or carries the same CWE, so the flaw was probably merged, split or anchored
-    elsewhere. Check that the named finding covers it.
+  - *code unchanged, reported differently (id)*: a finding of the same category or CWE this run sits
+    in the same file, on overlapping lines or within 15 lines, so the flaw was probably merged,
+    split or re-anchored. Check that the named finding covers it.
   - *code unchanged, not reported*: probably missed this time. Re-check it; it is also listed under
-    Coverage Gaps.
+    Coverage Gaps. When a finding of the same category and CWE exists in another file, the reason
+    names it as a hint only: the same CWE elsewhere is usually another flaw (one IDOR per endpoint),
+    and matching on it once hid a real high finding.
   - *file removed*.
 - A scoped run compares only the files in its scope.
 - In the chat summary, report both kinds of gone findings, not only the fixed ones.

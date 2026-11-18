@@ -97,13 +97,13 @@ python scripts/pipeline.py init --root <repo> --lang <code> [--mode audit|fix] \
 **Taint engine**: `engine.py status` kiểm tra OpenGrep. Trong sandbox dùng một lần thì cài luôn; trên máy người dùng thì hỏi một lần. `install` từ chối chạy khi thiếu `cosign` (không verify được chữ ký) — người dùng chọn cài cosign hoặc tự chấp nhận `--allow-unverified`; agent không tự thêm cờ này. Từ chối cài → ghi coverage gap và tiếp tục.
 
 ```bash
-python scripts/pipeline.py run scripted --run-dir $RUN_DIR   # [--depth 3] [--max-targets 150] [--offline]
+python scripts/pipeline.py run scripted --run-dir $RUN_DIR   # [--depth 3] [--max-targets 150] [--max-memory-mb N] [--offline]
 ```
 
 | Step | Output | Content |
 |---|---|---|
 | `inventory` | `inventory.json` | File code + config + IaC + CI, framework, lockfile, shard tạm |
-| `taint` | `scan/taint.json` | Luồng source → sink kèm trace cho C#, JS/TS, Python, Go, PHP, Dart (bỏ qua asset vendor và file minified): trong hàm, giữa hàm (cùng file), giữa file (confidence medium) |
+| `taint` | `scan/taint.json` | Luồng source → sink kèm trace cho C#, JS/TS (cả phần `<script>` của `.vue`/`.svelte`), Python, Go, PHP, Dart: trong hàm, giữa hàm (cùng file), giữa file (confidence medium). Bỏ qua asset vendor và mọi file inventory đã bỏ (minified, quá lớn, generated). Mỗi lần chạy engine có giới hạn thời gian và RAM (`--max-memory-mb`); vượt thì kill cả cây tiến trình và ghi coverage gap |
 | `scan` | `scan/hits.json`, `scan/shards/<SID>.json` | Pattern finding + gate + taint flow, secret đã che, áp suppression và false positive đã duyệt trong `triage.yml` (hit bị bỏ qua vẫn được đếm trong report), rule Semgrep tuỳ chỉnh; xếp lại shard theo rủi ro; in `REVIEW_MODE` |
 | `deps` | `deps.json` | Vệ sinh manifest + audit lỗ hổng đã biết bằng tool có sẵn (osv-scanner, npm audit, dotnet, pip-audit, govulncheck) |
 
@@ -166,10 +166,10 @@ python scripts/pipeline.py run finish --run-dir $RUN_DIR
 ```
 
 - **narrative.json** (agent viết trước khi render): *executive summary* 5–8 câu — tư thế bảo mật tổng thể, 2–3 nguyên nhân gốc, rủi ro nghiêm trọng nhất theo ngôn ngữ kinh doanh, giới hạn coverage lớn nhất; *roadmap* — xoay vòng secret bị lộ và sửa critical trước, rồi sửa mang tính hệ thống (global query filter, fallback authorization policy, validation layer dùng chung), rồi phần còn lại.
-- **So với run trước**: mục "Changes Since Previous Run" gắn mỗi finding là *new* hoặc *persisting*, và liệt kê finding cũ đã hết:
+- **So với run trước**: mục "Changes Since Previous Run" gắn mỗi finding là *new* hoặc *persisting*. Finding vẫn còn nhưng đổi mức (vd. high → medium) nằm ở bảng *Severity changed*, không bị tính là đã hết. Sau đó liệt kê finding cũ đã hết:
   - *code changed*: có thể đã sửa, cần xác nhận.
-  - *code unchanged, reported differently (id)*: cùng lỗi nhưng lần này được gộp, tách hoặc báo ở file khác.
-  - *code unchanged, not reported*: có thể lần này bỏ sót. Mục này cũng được ghi vào Coverage Gaps.
+  - *code unchanged, reported differently (id)*: cùng lỗi, cùng file và gần cùng chỗ, nhưng lần này được gộp, tách hoặc neo lệch vài dòng.
+  - *code unchanged, not reported*: có thể lần này bỏ sót. Mục này cũng được ghi vào Coverage Gaps. Nếu có finding cùng CWE ở file khác thì finding đó chỉ được nêu làm gợi ý để kiểm tra; trùng CWE không đủ để coi là đã báo.
 - **Known from Earlier Runs**: liệt kê finding khớp `triage.yml` (verdict, entry, lý do, hạn) để người dùng rà lại khi threat model thay đổi.
 - **Chat summary**: coverage gap trước, rồi top 5 finding mỗi cái một dòng, số lượng theo severity, secret cần rotate — không dán cả report. Nếu có run trước thì nói cả finding đã sửa lẫn finding có thể bị bỏ sót.
 - **Learn (hỏi người dùng)**: khi `run finish` in gợi ý `learn:`, agent chạy `memory.py learn`, đưa danh sách đề xuất cho người dùng và chỉ ghi vào `triage.yml` những đề xuất được duyệt. Chi tiết ở mục 11 và `references/cross-run-memory.md`.

@@ -666,7 +666,9 @@ def detail(f):
     head = (f"#### {f['id']} · {t(f['title'])}\n"
             f"{loc(f)} · {f['owasp']} {OWASP_2025.get(f['owasp'], '')} · {' · '.join(extra) + ' · ' if extra else ''}"
             f"**{f['severity']}** · confidence {f['confidence']} · requires {f['requires']} · {f['kind']} · {f['status']}"
-            + (f" · {f['delta']}" + (f" (was {f['baseline_id']})" if f.get("baseline_id") else "") if f.get("delta") else "")
+            + (f" · {f['delta']}" + (f" (was {f['baseline_id']}" + (f", {f['baseline_severity']} → {f['severity']}"
+                                                                      if f.get("baseline_severity") else "") + ")"
+                                       if f.get("baseline_id") else "") if f.get("delta") else "")
             + "\n")
     body = [f"- **Evidence:** {t(f['evidence'])}", f"- **Attack scenario:** {t(f['attack_scenario'])}",
             f"- **Impact:** {t(f['impact'])}", f"- **Fix:** {t(f['fix'])}",
@@ -795,6 +797,7 @@ def cmd_report(run):
             gaps.append(f"- No taint rule pack for: {', '.join(missing)}")
         if t_tool.get("errors"):
             gaps.append(f"- Taint engine reported {t_tool['errors']} errors (see scan/taint.json)")
+        gaps += [f"- Taint: {md_text(g)}" for g in t_tool.get("gaps") or []]
         gaps.append(f"- Cross-file taint follows calls by name + argument position up to depth "
                     f"{read_json(run / 'scan' / 'taint.json', {}).get('depth', 3)}; dynamic dispatch, reflection, "
                     "DI by string, queues and HTTP hops between services are not followed.")
@@ -824,7 +827,7 @@ def cmd_report(run):
     if scope.get("kind") == "changeset":
         gaps.append("- Changeset scope: only changed files (+ one hop of callers/callees) were reviewed; "
                     "no whole-system claims (OWASP checklist, data classification, compliance) are made.")
-    missed = [x for x in (delta or {}).get("gone", []) if x["reason"] == "code unchanged, not reported"]
+    missed = [x for x in (delta or {}).get("gone", []) if x.get("possible_miss")]
     if missed:
         gaps.append(f"- {len(missed)} findings of the previous run sit on unchanged code but were not reported "
                     "this run (possible misses — see Changes Since Previous Run): "
@@ -852,12 +855,22 @@ def cmd_report(run):
 
     L += ["", "## Changes Since Previous Run", ""]
     if delta:
-        gone = delta["gone"]
+        gone, changed = delta["gone"], delta.get("severity_changed", [])
         L.append(f"Baseline: `{Path(delta['baseline']).name}` ({delta.get('baseline_created') or '?'}). "
-                 f"{delta['new']} new, {delta['persisting']} persisting, {len(gone)} no longer reported.")
+                 f"{delta['new']} new, {delta['persisting']} persisting"
+                 + (f" ({len(changed)} with another severity)" if changed else "")
+                 + f", {len(gone)} no longer reported.")
+        if changed:  # still reported, at another severity: never listed as gone
+            L += ["", "Severity changed (still reported):", "",
+                  table([[x["baseline_id"], x["id"], x["title"], f"`{x['file']}:{x['line_start']}`",
+                          f"{x['from']} → {x['to']}"] for x in changed[:40]],
+                        ["Previous ID", "ID", "Title", "Location", "Severity"])]
+            if len(changed) > 40:
+                L.append(f"… and {len(changed) - 40} more (merged.json → delta)")
         if gone:
-            L += ["", table([[x["id"], x["title"], f"`{x['file']}:{x['line_start']}`", x["severity"], x["reason"]]
-                             for x in gone[:40]], ["Previous ID", "Title", "Location", "Severity", "Why gone"])]
+            L += ["", "No longer reported:", "",
+                  table([[x["id"], x["title"], f"`{x['file']}:{x['line_start']}`", x["severity"], x["reason"]]
+                         for x in gone[:40]], ["Previous ID", "Title", "Location", "Severity", "Why gone"])]
             if len(gone) > 40:
                 L.append(f"… and {len(gone) - 40} more (merged.json → delta)")
             L += ["", "_code changed_ = likely fixed, confirm; _code unchanged, not reported_ = possibly missed "
@@ -920,7 +933,8 @@ def cmd_report(run):
         print(f"WARNING: table repaired — {pr} (follow references/report-tables.md)")
     print(f"report.md written: {len(live)} findings ({dict(sev)}), {len(rejected)} rejected, "
           f"{len(known)} known from triage.yml, {len(gaps)} coverage gaps"
-          + (f"; vs previous run: {delta['new']} new, {delta['persisting']} persisting, {len(delta['gone'])} gone"
+          + (f"; vs previous run: {delta['new']} new, {delta['persisting']} persisting "
+             f"({len(delta.get('severity_changed', []))} severity changed), {len(delta['gone'])} gone"
              if delta else ""))
     if rejected or doc.get("dismissed"):
         print("learn: `scripts/memory.py learn --run-dir <RUN_DIR>` proposes triage.yml entries from the "

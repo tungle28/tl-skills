@@ -95,6 +95,14 @@ def count_loc(path, lang):
     return len(lines)
 
 
+def skip_reason(path):
+    """Why count_loc() left a file out: 'large' (over MAX_FILE_BYTES), 'minified' or 'unreadable'."""
+    try:
+        return "large" if path.stat().st_size > MAX_FILE_BYTES else "minified"
+    except OSError:
+        return "unreadable"
+
+
 def walk(root, extra_excludes, skipped=None):
     """Yield (path, rel). `skipped`, if given, collects what was left out for the report:
     {"dirs": set of excluded folder paths found, "glob_files": count of files matched by --exclude}."""
@@ -218,6 +226,7 @@ def main():
         diff_refs, changed = git_changed_ranges(root, a.diff)
 
     files, lockfiles, skipped, unknown, vendor_roots = [], [], 0, 0, set()
+    skipped_files = []  # code files left out (minified/large/generated): taint must not scan them either
     left_out = {"dirs": set(), "glob_files": 0}
     for p, rel in walk(root, a.exclude, left_out):
         if p.name.lower() in LOCKFILES:
@@ -226,10 +235,14 @@ def main():
         lang = detect_lang(rel)
         if not lang or is_generated(rel):
             unknown += 1
+            if lang and lang not in CONFIG_LANGS:
+                skipped_files.append({"path": rel, "lang": lang, "reason": "generated"})
             continue
         loc = count_loc(p, lang)
         if loc is None:
             skipped += 1
+            if lang not in CONFIG_LANGS:
+                skipped_files.append({"path": rel, "lang": lang, "reason": skip_reason(p)})
             continue
         is_mig = any(part.lower() in MIGRATION_DIRS for part in Path(rel).parts[:-1])
         in_scope = ((not a.only or any(fnmatch.fnmatch(rel, g) for g in a.only))
@@ -275,6 +288,8 @@ def main():
                    "skipped_large_or_minified": skipped, "unrecognized_files": unknown},
         # taint skips these (rules and secrets still scan them); review skips them unless --include-vendor
         "vendor_roots": sorted(vendor_roots), "include_vendor": a.include_vendor, "exclude_globs": a.exclude,
+        # code files the inventory left out; taint passes them to the engine as excludes
+        "skipped_files": skipped_files,
         # what the report lists under "Skipped": excluded folders actually present, --exclude hits, flags
         "excluded": {"dirs": collapse_dirs(left_out["dirs"]), "glob_files": left_out["glob_files"],
                      "include_tests": a.include_tests, "include_migrations": a.include_migrations},

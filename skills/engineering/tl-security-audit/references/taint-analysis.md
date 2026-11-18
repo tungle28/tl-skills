@@ -29,12 +29,33 @@ become scanner findings with a **trace** (source → calls → sink) that review
 
 ## Scope and time
 - The engine scans the repo minus `common.EXCLUDE_DIRS` (names that occur in the repo's own path are
-  dropped, so a copy under `.security-run/` is still scanned), minified/generated files, the
-  inventory's `--exclude` globs and vendored front-end assets (`inventory.json` `vendor_roots`;
-  `--include-vendor` at init keeps them).
-- Each round runs once per language. `--timeout` is per file; a whole run that exceeds
-  `max(600, 60 × timeout)` s is lost for that language and round only, and is printed as a
-  `COVERAGE GAP` — 0 flows after a timeout is never "clean".
+  dropped, so a copy under `.security-run/` is still scanned), generated suffixes, the inventory's
+  `--exclude` globs, vendored front-end assets (`inventory.json` `vendor_roots`; `--include-vendor`
+  at init keeps them) and every file of a taint language the inventory skipped as minified, too
+  large or generated (`inventory.json` `skipped_files`). A bundle without `.min` in its name (e.g.
+  `resources/assets/core/js/core.js`) is caught this way. If the list does not fit on the command
+  line, the rest is left to the engine's `--exclude-minified-files` and reported as a gap.
+- Each round runs once per language. `--timeout` is per file. Each engine run is a bounded process
+  tree (`scripts/proctree.py`): over `max(600, 60 × timeout)` s, or over `--max-memory-mb` (default
+  half the RAM, at most 8192; `0` = none; also passed to the engine as `--max-memory`), every engine
+  process is killed, workers included (Windows: a Job object; POSIX: the process group), and that
+  language/round is lost. It is printed and reported as a `COVERAGE GAP` — 0 flows after a kill is
+  never "clean". `taint.json` records the limits and the peak memory (`stats.peak_memory_mb`).
+  When the tree's memory cannot be measured (Windows: the Job object could not be created or
+  assigned; POSIX: no `ps`), a run with a limit fails closed: it is stopped and reported, never run
+  with only the engine's per-file cap. `--max-memory-mb 0` runs without a limit.
+  How strong the memory limit is depends on the OS (`stats.memory_limit` in `taint.json`):
+  - `enforced` (Windows): the Job object gives the exact peak of the whole tree, workers included;
+    it is also compared with the limit after a run that ended before the first poll.
+  - `sampled` (Linux/macOS): the standard library has no whole-tree limit (that needs cgroups), so
+    the summed RSS of the process group is sampled every second and a breach seen by a sample kills
+    the group. A peak between samples, or in a run shorter than one, is not seen. The report lists
+    this as a coverage gap instead of claiming the limit held.
+- `.vue`/`.svelte`: the engine does not read single-file components, so `taint.py` copies their
+  `<script>` blocks to a temporary mirror (`<rel>.js`; `.ts` for `lang="ts"`, `.tsx` for
+  `lang="tsx"` so JSX is parsed), at their original line and column with everything else blanked, scans it with the repo and maps results back to the
+  component. Template bindings (`v-html`, `:href`, `{@html}`) are not followed by taint; pattern
+  rules cover them, and the report states this gap.
 
 ## Three layers
 | Layer | What it follows | How | Confidence |
@@ -142,7 +163,7 @@ a sink.
 python3 scripts/engine.py status            # engine, version, capabilities
 python3 scripts/engine.py install           # pinned OpenGrep into the user cache (ask first)
 python3 scripts/taint.py test [--lang go] [--kind ssrf] [--repo <repo>]   # run spec examples
-python3 scripts/pipeline.py run taint --run-dir $RUN_DIR [--depth 3] [--max-targets 150] [--timeout 20]
+python3 scripts/pipeline.py run taint --run-dir $RUN_DIR [--depth 3] [--max-targets 150] [--timeout 20] [--max-memory-mb 4096]
 python3 scripts/taint.py --run-dir $RUN_DIR --include-vendor     # also scan vendored assets
 ```
 Output: `<RUN_DIR>/scan/taint.json` (engine, mode, stats, errors, hits with traces); generated rules

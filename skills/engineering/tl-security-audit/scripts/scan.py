@@ -197,7 +197,10 @@ def main():
                 "reason": taint.get("reason", ""), "mode": taint.get("mode"),
                 "engine": (taint.get("engine") or {}).get("kind"), "version": (taint.get("engine") or {}).get("version"),
                 "languages": taint.get("languages", []), "stats": taint.get("stats", {}),
-                "errors": len(taint.get("errors", [])) + len(taint.get("spec_errors", []))}
+                "errors": len(taint.get("errors", [])) + len(taint.get("spec_errors", [])),
+                # timeouts/memory kills, .vue/.svelte templates, signature-less languages: the report
+                # lists them under Coverage Gaps
+                "gaps": taint.get("gaps", [])}
         tools.append(st_t)
         for h in taint.get("hits", []):
             why = suppressed_by(h, sups, texts.get(h["file"], "").splitlines()) or triage_hit(h, known_fp, src)

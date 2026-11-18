@@ -15,16 +15,20 @@ strong *candidate*, not a proof: unique names → confidence medium, ambiguous n
 
 Rule packs: rules/taint/<lang>.yml (+ <repo>/.security-audit/taint/*.yml). See references/taint-analysis.md.
 
-  taint.py --run-dir D [--depth 3] [--max-targets 150] [--timeout 20]
+  taint.py --run-dir D [--depth 3] [--max-targets 150] [--timeout 20] [--max-memory-mb N]
 Each round runs the engine once per language, so a slow language (often JS) cannot cost the others
-their flows; vendored assets and minified/generated files are not scanned (inventory decides).
+their flows; vendored assets and the files the inventory skipped (minified, too large, generated) are
+not scanned. Each engine run is a bounded process tree (proctree.py): over its time or memory limit
+the whole tree is killed and that language/round is reported as a coverage gap.
+Vue/Svelte single-file components: the engine does not read .vue/.svelte, so their <script> blocks
+are copied (at their original line numbers) to a temporary mirror that is scanned with the repo.
   taint.py test [--lang python] [--kind sql-injection]      run the examples in the specs
 """
 import argparse
 import copy
 import json
 import re
-import subprocess
+import shutil
 import tempfile
 import time
 from collections import defaultdict
@@ -34,6 +38,7 @@ import yaml
 
 from common import EXCLUDE_DIRS, GENERATED_SUFFIXES, is_test_path, load_state, now_iso, read_json, write_json
 from engine import find_engine
+from proctree import default_memory_mb, run_tree
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 RESERVED = ("$SAFN", "$SAP", "$SARV", "$SATY", "$SARET", "$SABODY", "$SAE", "$SAO", "$SAX", "$SART")
@@ -194,54 +199,170 @@ def bridge_rule(spec, kind, tid, node, entry):
 
 # ------------------------------------------------------------------ engine run
 
-def engine_excludes(root, extra=()):
-    """--exclude values. Names that are part of the root's own path are dropped: the engine matches
-    excludes against the whole path, so a repo copied under e.g. .security-run/ would yield 0 files."""
-    own = {part.lower() for part in Path(root).resolve().parts}
+def engine_excludes(root, extra=(), also=()):
+    """--exclude values. Names that are part of the root's own path (or of another scanned target in
+    `also`, e.g. the .vue mirror) are dropped: the engine matches excludes against the whole path, so
+    a repo copied under e.g. .security-run/ would yield 0 files."""
+    own = {part.lower() for t in (root, *also) for part in Path(t).resolve().parts}
     return sorted(d for d in EXCLUDE_DIRS if d.lower() not in own) + list(extra)
 
 
-def run_engine(engine, rules, root, workdir, name, timeout, files=None, excludes=None):
+# Characters of skipped-file excludes put on the command line (Windows caps a command at 32767).
+EXCLUDE_ARG_BUDGET = 16000
+
+
+def _glob_escape(path):
+    """A literal path as an exclude pattern (gitignore syntax: `[`, `]`, `*`, `?` and a leading `!`
+    or `#` are special). The engine matches a pattern containing a slash as a path suffix, so a
+    repo-relative path also works when the scan root is a sub-folder of a git repository."""
+    s = re.sub(r"([\[\]*?])", r"\\\1", path)
+    return "\\" + s if s[:1] in ("!", "#") else s
+
+
+def taint_excludes(inv, langs, include_vendor=False):
+    """Engine excludes that keep taint to the files the inventory kept: vendored asset roots,
+    generated suffixes, the user's --exclude globs, and every file of a taint language that the
+    inventory skipped as minified, too large or generated. A bundle without `.min` in its name
+    (resources/assets/core/js/core.js) is otherwise parsed by the engine and can stall a whole round.
+    Returns (patterns, number of skipped files that did not fit on the command line)."""
+    vendor = [] if include_vendor else [v.rstrip("/") for v in inv.get("vendor_roots", [])]
+    gen = tuple(s for s in GENERATED_SUFFIXES if s.startswith("."))
+    out = vendor + ["*" + s for s in gen] + list(inv.get("exclude_globs", []))
+    under_vendor = tuple(v + "/" for v in vendor)
+    skipped = sorted({s["path"] for s in inv.get("skipped_files", [])
+                      if s.get("lang") in langs and not (under_vendor and s["path"].startswith(under_vendor))
+                      and not s["path"].lower().endswith(gen)})
+    budget, left = EXCLUDE_ARG_BUDGET, 0
+    for path in skipped:
+        pat = _glob_escape(path)
+        if len(pat) + 12 > budget:
+            left += 1
+            continue
+        out.append(pat)
+        budget -= len(pat) + 12
+    return out, left
+
+
+def run_engine(engine, rules, root, workdir, name, timeout, files=None, excludes=None, targets=None,
+               wall=None, max_memory_mb=0, flags=(), meter=None):
+    """One engine run. `wall` (default max(600, 60 x timeout) s) and `max_memory_mb` (0 = none) bound
+    the whole process tree: on breach every engine process, workers included, is killed and the run
+    returns an error at once. `meter` collects the peak memory of the tree."""
     cfg = Path(workdir) / f"{name}.yml"
     cfg.write_text(yaml.safe_dump({"rules": rules}, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    wall = wall or max(600, timeout * 60)
     cmd = [engine["exe"], "scan", "--config", str(cfg), "--json", "--quiet", "--dataflow-traces",
            "--timeout", str(timeout), "--max-target-bytes", "1000000"]
     if engine["intrafile"]:
         cmd.append("--taint-intrafile")
     if engine["kind"] == "semgrep":
         cmd += ["--metrics=off", "--disable-version-check"]
+    if max_memory_mb:
+        cmd += ["--max-memory", str(max_memory_mb)]  # the engine's own cap per rule and file
+    cmd += list(flags)
     for d in (engine_excludes(root) if excludes is None else excludes):
         cmd += ["--exclude", d]
-    cmd += [str(root)] if not files else [str(Path(root) / f) for f in files]
-    t0 = time.time()
+    if files:
+        cmd += [str(Path(root) / f) for f in files]
+    else:
+        cmd += [str(t) for t in (targets or [root])]
+    r = run_tree(cmd, wall, max_memory_mb)
+    if meter is not None and r["peak_memory_mb"] is not None:
+        meter["peak_memory_mb"] = max(meter.get("peak_memory_mb") or 0, r["peak_memory_mb"])
+    if meter is not None and r.get("memory_limit"):  # "sampled" on any run outranks "enforced"
+        meter["memory_limit"] = "sampled" if "sampled" in (meter.get("memory_limit"), r["memory_limit"]) \
+            else r["memory_limit"]
+    if r["killed"] == "timeout":
+        return [], [f"{name}: engine timed out after {wall}s (process tree killed)"], r["seconds"]
+    if r["killed"] == "memory":
+        return [], [f"{name}: engine exceeded the memory limit of {max_memory_mb} MB (process tree killed)"], \
+            r["seconds"]
+    if r["killed"] == "unmeasured":
+        return [], [f"{name}: the memory limit of {max_memory_mb} MB could not be enforced on the engine's process "
+                    "tree (no Job object / no ps), so the engine was stopped (process tree killed); re-run with "
+                    "--max-memory-mb 0 to run without a limit"], r["seconds"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=max(600, timeout * 60))
-        data = json.loads(r.stdout or "{}")
-    except subprocess.TimeoutExpired:
-        return [], [f"{name}: engine timed out after {max(600, timeout * 60)}s"], time.time() - t0
+        data = json.loads(r["stdout"] or "{}")
     except ValueError:
-        return [], [f"{name}: engine output not JSON: {(r.stderr or r.stdout)[:300]}"], time.time() - t0
+        return [], [f"{name}: engine output not JSON: {(r['stderr'] or r['stdout'])[:300]}"], r["seconds"]
     errs = [f"{name}: {e.get('type', '')}: {str(e.get('message', ''))[:200]}" for e in data.get("errors", [])
             if e.get("level", "error") == "error"]
-    return data.get("results", []), errs, time.time() - t0
+    if max_memory_mb and (r["peak_memory_mb"] or 0) >= max_memory_mb * 0.98:
+        errs.append(f"{name}: engine reached the memory limit of {max_memory_mb} MB, some files may be missing")
+    return data.get("results", []), errs, r["seconds"]
 
 
-def rel(root, p):
+def rel(root, p, mirror=None):
+    """Repo-relative path of an engine result. A file of the .vue/.svelte mirror maps back to its
+    component (`<mirror>/src/A.vue.js` -> `src/A.vue`)."""
+    if mirror:
+        try:
+            return Path(p).resolve().relative_to(Path(mirror).resolve()).as_posix().rsplit(".", 1)[0]
+        except ValueError:
+            pass
     try:
         return Path(p).resolve().relative_to(Path(root).resolve()).as_posix()
     except ValueError:
         return p
 
 
+# ------------------------------------------------------------------ single-file components
+
+SFC_SUFFIXES = (".vue", ".svelte")
+_SCRIPT_BLOCK = re.compile(r"(<script\b[^>]*>)(.*?)</script\s*>", re.S | re.I)
+_SCRIPT_LANG = re.compile(r"""\blang\s*=\s*["']?(tsx|ts|typescript)\b""", re.I)
+SFC_EXT = {"javascript": ".js", "typescript": ".ts", "tsx": ".tsx"}  # the engine picks its parser by extension
+
+
+def _blank(s):
+    return re.sub(r"[^\n]", " ", s)
+
+
+def sfc_script(text):
+    """(code, language) of a .vue/.svelte file: its <script> blocks kept at their original line and
+    column, everything else (template, style, the tags themselves) blanked with newlines kept, so
+    engine line numbers point into the component. (None, None) when there is no script code."""
+    out, pos, lang = [], 0, "javascript"
+    for m in _SCRIPT_BLOCK.finditer(text):
+        out += [_blank(text[pos:m.start(2)]), m.group(2)]
+        pos = m.end(2)
+        tag = _SCRIPT_LANG.search(m.group(1))
+        if tag:  # lang="tsx" needs the TSX parser (JSX); it also reads plain TypeScript, so it wins
+            found = "tsx" if tag.group(1).lower() == "tsx" else "typescript"
+            lang = "tsx" if "tsx" in (lang, found) else found
+    code = "".join(out + [_blank(text[pos:])]) if out else ""
+    return (code, lang) if code.strip() else (None, None)
+
+
+def build_sfc_mirror(root, files, dest):
+    """Write the script part of each .vue/.svelte file in `files` to `dest/<rel>.js` (`.ts` for
+    lang="ts", `.tsx` for lang="tsx"). Returns {rel: extracted code}."""
+    texts = {}
+    for f in files:
+        if not f.lower().endswith(SFC_SUFFIXES):
+            continue
+        try:
+            text = (Path(root) / f).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        code, lang = sfc_script(text)
+        if not code:
+            continue
+        out = Path(dest) / (f + SFC_EXT[lang])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(code, encoding="utf-8")
+        texts[f] = code
+    return texts
+
+
 def rid_parts(check_id):
     return check_id.split(".")[-1].split("__")  # engines prefix ids with the config path
 
 
-def loc_of(root, cli_loc):
+def loc_of(root, cli_loc, mirror=None):
     try:
         loc = cli_loc[1][0] if cli_loc[0] == "CliLoc" else None
-        return {"file": rel(root, loc["path"]), "line": loc["start"]["line"], "text": cli_loc[1][1][:160]}
+        return {"file": rel(root, loc["path"], mirror), "line": loc["start"]["line"], "text": cli_loc[1][1][:160]}
     except (TypeError, KeyError, IndexError):
         return None
 
@@ -444,26 +565,34 @@ def spec_family(spec):
     return "javascript" if l in ("javascript", "typescript", "js", "ts") else l
 
 
-def run_by_language(engine, rules, root, workdir, name, timeout, excludes):
+def run_by_language(engine, rules, root, workdir, name, timeout, excludes, **limits):
     """One engine run per language: a timeout in one language costs only that language's flows."""
     by_lang = defaultdict(list)
     for r in rules:
         by_lang[r["id"].split("__")[1]].append(r)
     res, errs, secs = [], [], 0.0
     for lang, rs in sorted(by_lang.items()):
-        r1, e1, s1 = run_engine(engine, rs, root, workdir, f"{name}_{lang}", timeout, excludes=excludes)
+        r1, e1, s1 = run_engine(engine, rs, root, workdir, f"{name}_{lang}", timeout, excludes=excludes, **limits)
         res, errs, secs = res + r1, errs + e1, secs + s1
     return res, errs, secs
 
 
-def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=150, timeout=20, excludes=None):
+def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=150, timeout=20, excludes=None,
+            sfc=None, max_memory_mb=0, flags=(), wall=None):
+    """`sfc` = {"root": mirror dir, "texts": {rel: script code}} from build_sfc_mirror: the mirror is
+    scanned with the repo and its results map back to the .vue/.svelte files."""
     t0 = time.time()
+    mirror = sfc["root"] if sfc else None
+    meter = {}
+    limits = {"targets": [root] + ([mirror] if mirror else []), "max_memory_mb": max_memory_mb,
+              "flags": flags, "wall": wall, "meter": meter}
     active = {l: s for l, s in specs.items() if any(files_by_lang.get(il) for il in s["inventory_languages"])}
     fam_files = defaultdict(list)
     for l, s in active.items():
         for il in s["inventory_languages"]:
             fam_files[spec_family(s)] += files_by_lang.get(il, [])
-    cache, errors, stats = {}, [], {"rounds": 0, "rules_run": 0, "facts": 0, "engine_seconds": 0.0}
+    cache = dict(sfc["texts"]) if sfc else {}  # signatures of a component are read from its script part
+    errors, stats = [], {"rounds": 0, "rules_run": 0, "facts": 0, "engine_seconds": 0.0}
     hits, nodes = [], {}  # nodes: key (lang, kind, fn, param) -> node
     # cross-file chains need a signature parser for the language; without one, intra-file only
     no_xfile = sorted(l for l, s in active.items() if spec_family(s) not in DEF_RX)
@@ -474,7 +603,7 @@ def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=15
         rules += entry_rules(s) + ([] if l in no_xfile else summary_rules(s))
     if not rules:
         return {"hits": [], "errors": [], "gaps": gaps, "stats": stats, "languages": []}
-    res, errs, secs = run_by_language(engine, rules, root, workdir, "round0", timeout, excludes)
+    res, errs, secs = run_by_language(engine, rules, root, workdir, "round0", timeout, excludes, **limits)
     errors += errs
     stats["rules_run"] += len(rules)
     stats["engine_seconds"] += secs
@@ -487,12 +616,12 @@ def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=15
         spec = active.get(lang)
         if not spec:
             continue
-        path = rel(root, r["path"])
+        path = rel(root, r["path"], mirror)
         sink = {"file": path, "line": r["start"]["line"], "text": r["extra"].get("lines", "").strip()[:160]}
         tr = r["extra"].get("dataflow_trace") or {}
         if typ == "entry":
-            src = loc_of(root, tr.get("taint_source"))
-            steps = [loc_of(root, v.get("location") and ["CliLoc", [v["location"], v.get("content", "")]])
+            src = loc_of(root, tr.get("taint_source"), mirror)
+            steps = [loc_of(root, v.get("location") and ["CliLoc", [v["location"], v.get("content", "")]], mirror)
                      for v in (tr.get("intermediate_vars") or [])[:4]]
             hits.append(make_hit(spec, kind, sink, src, [s for s in steps if s], "intra", []))
         elif typ == "sum":
@@ -526,7 +655,7 @@ def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=15
             rules.append(bridge_rule(spec, node["kind"], tid, node, entry=True))
             if rnd < depth:
                 rules.append(bridge_rule(spec, node["kind"], tid, node, entry=False))
-        res, errs, secs = run_by_language(engine, rules, root, workdir, f"round{rnd}", timeout, excludes)
+        res, errs, secs = run_by_language(engine, rules, root, workdir, f"round{rnd}", timeout, excludes, **limits)
         errors += errs
         stats["rules_run"] += len(rules)
         stats["engine_seconds"] += secs
@@ -538,10 +667,10 @@ def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=15
             typ, lang = parts[0], parts[1]
             target = nodes[table[parts[3]]]
             spec = active[lang]
-            call = {"file": rel(root, r["path"]), "line": r["start"]["line"],
+            call = {"file": rel(root, r["path"], mirror), "line": r["start"]["line"],
                     "text": r["extra"].get("lines", "").strip()[:160]}
             if typ == "bent":
-                src = loc_of(root, (r["extra"].get("dataflow_trace") or {}).get("taint_source"))
+                src = loc_of(root, (r["extra"].get("dataflow_trace") or {}).get("taint_source"), mirror)
                 chain = chain_of(nodes, table[parts[3]])
                 if target["sink"] and call["file"] == target["file"] and call["line"] >= target["def_line"] and \
                         call["line"] <= target["sink"]["line"] and len(chain) == 1:
@@ -582,6 +711,18 @@ def analyze(root, specs, engine, workdir, files_by_lang, depth=3, max_targets=15
             best[k]["other_sources"] = best[k].get("other_sources", 0) + 1
     stats["seconds"] = round(time.time() - t0, 1)
     stats["engine_seconds"] = round(stats["engine_seconds"], 1)
+    stats["peak_memory_mb"] = meter.get("peak_memory_mb")
+    stats["memory_limit"] = meter.get("memory_limit")  # enforced (Windows Job) / sampled (POSIX) / None
+    if meter.get("memory_limit") == "sampled":
+        gaps.append(f"engine RAM cap of {max_memory_mb} MB was only sampled (POSIX has no whole-tree limit "
+                    "without cgroups): a process-tree peak between 1 s samples, or in a run shorter than one, "
+                    "is neither seen nor bounded")
+    for e in errors:  # a killed run lost that language's flows for the round: never read as clean
+        name, detail = e.split(':', 1)[0], e.split(':', 1)[1].strip()
+        if "process tree killed" in e:
+            gaps.append(f"{name}: {detail}; its flows are missing")
+        elif "memory limit" in e:  # finished at the limit: results kept, but they may be partial
+            gaps.append(f"{name}: {detail}; some of its flows may be missing")
     return {"hits": list(best.values()), "errors": errors, "gaps": gaps, "stats": stats, "languages": sorted(active)}
 
 
@@ -668,16 +809,41 @@ def cmd_run(a):
     if own:
         print(f"WARNING: the repo path contains excluded folder name(s) {', '.join(sorted(own))}; "
               "they are not passed to the engine as excludes (a copy of a repo under .security-run/ is scanned)")
-    # vendored assets, minified/generated files and the user's --exclude globs are not taint-scanned
-    extra = [] if a.include_vendor else list(inv.get("vendor_roots", []))
-    extra += ["*" + s for s in GENERATED_SUFFIXES if s.startswith(".")] + list(inv.get("exclude_globs", []))
-    result = analyze(root, specs, engine, work, fbl, a.depth, a.max_targets, a.timeout,
-                     excludes=engine_excludes(root, extra))
+    # vendored assets, the files the inventory skipped (minified, too large, generated) and the user's
+    # --exclude globs are not taint-scanned
+    langs = {il for s in specs.values() for il in s.get("inventory_languages") or []}
+    extra, not_passed = taint_excludes(inv, langs, a.include_vendor)
+    flags = ["--exclude-minified-files"] if not_passed else []
+    if not_passed:
+        print(f"WARNING: {not_passed} skipped files did not fit on the command line as excludes; "
+              "the engine's --exclude-minified-files is used for the rest")
+    max_mb = default_memory_mb() if a.max_memory_mb is None else a.max_memory_mb
+    sfc_files = sorted(f for fs in fbl.values() for f in fs if f.lower().endswith(SFC_SUFFIXES))
+    mirror = tempfile.mkdtemp(prefix="sa-sfc-") if sfc_files else None
+    try:
+        texts = build_sfc_mirror(root, sfc_files, mirror) if mirror else {}
+        sfc = {"root": mirror, "texts": texts} if texts else None
+        result = analyze(root, specs, engine, work, fbl, a.depth, a.max_targets, a.timeout,
+                         excludes=engine_excludes(root, extra, also=[mirror] if sfc else []), sfc=sfc,
+                         max_memory_mb=max_mb, flags=flags)
+    finally:
+        if mirror:
+            shutil.rmtree(mirror, ignore_errors=True)
+    if sfc_files:
+        result["gaps"].append(f"{len(sfc_files)} .vue/.svelte files: {len(texts)} with a <script> block were "
+                              "taint-scanned (script extracted at its original lines); template bindings "
+                              "(v-html, :href, {@html}) are not followed by taint, only by pattern rules")
+    if not_passed:
+        result["gaps"].append(f"{not_passed} files the inventory skipped could not be passed to the engine as "
+                              "excludes (command-line limit); the engine's own minified-file filter was used")
     status = "ran" if not result["errors"] else "ran-with-errors"
     write_json(out, {"generated_at": now_iso(), "status": status, "engine": engine,
                      "mode": "intrafile+xfile" if engine["intrafile"] else "intraprocedural+xfile",
                      "depth": a.depth, "spec_errors": spec_errors,
                      "excluded_vendor_roots": len(inv.get("vendor_roots", [])) if not a.include_vendor else 0,
+                     "limits": {"seconds_per_run": max(600, a.timeout * 60), "max_memory_mb": max_mb,
+                                "memory_limit": result["stats"].get("memory_limit")},
+                     "sfc_files": {"total": len(sfc_files), "scanned": len(texts)},
                      **result})
     hs = result["hits"]
     by = defaultdict(int)
@@ -689,11 +855,24 @@ def cmd_run(a):
     if not engine["intrafile"]:
         print("COVERAGE GAP: Semgrep CE has no cross-function taint — install OpenGrep for intrafile flows")
     for g in result["gaps"]:
-        print("COVERAGE GAP: taint", g)
+        if "process tree killed" not in g and "memory limit" not in g:  # printed below, with what to do
+            print("COVERAGE GAP: taint", g)
     for e in result["errors"]:
         if "timed out" in e:  # that language's flows for that round are missing — never read 0 flows as clean
             print(f"COVERAGE GAP: taint {e.split(':')[0]} timed out — its flows are missing; narrow the scope "
                   "with --exclude or re-run `run taint` with fewer --max-targets")
+        elif "could not be enforced" in e:
+            print(f"COVERAGE GAP: taint {e.split(':')[0]} stopped — a {max_mb} MB limit cannot be enforced on "
+                  "this machine; its flows are missing. Re-run `run taint --max-memory-mb 0` to run without one")
+        elif "process tree killed" in e:
+            print(f"COVERAGE GAP: taint {e.split(':')[0]} exceeded the memory limit ({max_mb} MB) — its flows "
+                  "are missing; narrow the scope with --exclude or re-run `run taint` with fewer --max-targets")
+        elif "memory limit" in e:
+            print(f"COVERAGE GAP: taint {e.split(':')[0]} reached the memory limit ({max_mb} MB) — some of its "
+                  "flows may be missing; narrow the scope with --exclude or re-run `run taint` with fewer "
+                  "--max-targets")
+    if result["stats"].get("peak_memory_mb") is not None:
+        print(f"taint: peak engine memory {result['stats']['peak_memory_mb']} MB (limit {max_mb or 'none'} MB)")
     for e in (spec_errors + result["errors"])[:10]:
         print("WARNING:", e)
 
@@ -760,6 +939,9 @@ def main():
     ap.add_argument("--max-targets", type=int, default=150, help="max functions bridged per round")
     ap.add_argument("--timeout", type=int, default=20, help="per-file engine timeout (s)")
     ap.add_argument("--include-vendor", action="store_true", help="also taint-scan vendored front-end assets")
+    ap.add_argument("--max-memory-mb", type=int, default=None,
+                    help="memory limit of one engine run, whole process tree (default: half the RAM, at most "
+                         "8192; 0 = no limit)")
     a = ap.parse_args()
     if a.cmd == "test":
         cmd_test(a)

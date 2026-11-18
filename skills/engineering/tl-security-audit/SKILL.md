@@ -110,15 +110,17 @@ token-expensive review is scoped.
 - If declined, continue — the taint phase records a coverage gap.
 
 ```bash
-python3 $S/scripts/pipeline.py run scripted --run-dir $RUN_DIR   # [--depth 3] [--max-targets 150] [--offline]
+python3 $S/scripts/pipeline.py run scripted --run-dir $RUN_DIR   # [--depth 3] [--max-targets 150] [--max-memory-mb N] [--offline]
 ```
 `scripted` runs inventory → taint → scan → deps in one command (each can also be run alone with
 `run <phase>`, e.g. to resume after a failure). Pass an absolute `--run-dir` or the one `init` printed.
 - `inventory` → files (code + config + IaC + CI), frameworks, lockfiles, provisional shards.
 - `taint` → `scan/taint.json`: source → sink flows with traces for C#, JS/TS, Python, Go, PHP, Dart —
   intra-function, cross-function (same file) and cross-file chains (confidence medium; low when a
-  function name is ambiguous). Vendored front-end assets and minified files are skipped. See
-  `references/taint-analysis.md`.
+  function name is ambiguous). Vendored front-end assets and every file the inventory skipped
+  (minified, too large, generated) are excluded; the `<script>` blocks of `.vue`/`.svelte` files are
+  scanned. Each engine run has a time and memory limit (`--max-memory-mb`); on breach the whole
+  engine process tree is killed and the gap is reported. See `references/taint-analysis.md`.
 - `scan` → `scan/hits.json` (pattern findings + gates + taint flows, secrets redacted),
   suppressions applied, optional custom Semgrep/OpenGrep rules, shards re-ranked by risk weight, `scan/shards/<SID>.json` with each shard's
   hits and applicable checks. It prints `REVIEW_MODE` (stored in `state.json`, see Phase 4).

@@ -146,7 +146,7 @@ COMPOSITE = {
     "collect": ("merge", "verify-queue"),               # after all reviewers wrote their files
     "finish": ("report",),                              # after all verifiers wrote their verdicts
 }
-TAINT_OPTS = ("--depth", "--max-targets")
+TAINT_OPTS = ("--depth", "--max-targets", "--max-memory-mb")
 
 
 def cmd_run(a):
